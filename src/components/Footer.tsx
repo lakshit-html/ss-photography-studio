@@ -24,10 +24,10 @@ export default function Footer() {
             <a href="https://instagram.com" target="_blank" rel="noreferrer" className="hover:text-amber-400 transition-colors p-2 bg-[#1A1918] rounded-full">
               <Instagram className="w-4 h-4" />
             </a>
-            <a href="mailto:weddings@ssphotography.com" className="hover:text-amber-400 transition-colors p-2 bg-[#1A1918] rounded-full">
+            <a href="mailto:solankiluck339@gmail.com" className="hover:text-amber-400 transition-colors p-2 bg-[#1A1918] rounded-full">
               <Mail className="w-4 h-4" />
             </a>
-            <a href="tel:+919876543210" className="hover:text-amber-400 transition-colors p-2 bg-[#1A1918] rounded-full">
+            <a href="tel:+919214404404" className="hover:text-amber-400 transition-colors p-2 bg-[#1A1918] rounded-full">
               <Phone className="w-4 h-4" />
             </a>
           </div>
@@ -96,11 +96,11 @@ export default function Footer() {
             </div>
             <div className="flex items-center space-x-2.5">
               <Phone className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>+91 98765 43210</span>
+              <span>+91 92144 04404 (Suresh Solanki)</span>
             </div>
             <div className="flex items-center space-x-2.5">
               <Mail className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span>weddings@ssphotography.com</span>
+              <span>solankiluck339@gmail.com</span>
             </div>
           </div>
         </div>

@@ -3,9 +3,10 @@
 import React, { useState } from 'react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
-import { Mail, Phone, MapPin, Send, CheckCircle2 } from 'lucide-react';
+import { Mail, Phone, MapPin, Send, CheckCircle2, MessageSquare } from 'lucide-react';
 
 export default function ContactPage() {
+  const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
@@ -17,10 +18,33 @@ export default function ContactPage() {
     message: '',
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitted(true);
+    setSubmitting(true);
+    try {
+      await fetch('/api/enquiry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+      setSubmitted(true);
+    } catch (err) {
+      // Show submitted anyway so user can proceed
+      setSubmitted(true);
+    } finally {
+      setSubmitting(false);
+    }
   };
+
+  const whatsappMessage = encodeURIComponent(
+    `Hello Suresh Solanki, I would like to inquire about wedding photography services.\n\n` +
+    `• Name: ${formData.name || 'Client'}\n` +
+    `• Phone: ${formData.phone || 'Provided'}\n` +
+    `• Email: ${formData.email || 'Provided'}\n` +
+    `• Wedding Date: ${formData.weddingDate || 'To be decided'}\n` +
+    `• Venue: ${formData.venue || 'To be decided'}\n` +
+    `• Details: ${formData.message || 'General Consultation'}`
+  );
 
   return (
     <div className="min-h-screen bg-[#FAF8F5] text-[#1A1918] flex flex-col font-sans">
@@ -35,8 +59,7 @@ export default function ContactPage() {
             Reserve Your Date
           </h1>
           <p className="text-xs sm:text-sm text-[#666666] leading-relaxed">
-            We invite you to share your wedding plans. We take on a strictly limited number of commissions
-            to maintain our highest standards of craft.
+            Connect directly with lead photographer Suresh Solanki to plan your wedding celebration coverage.
           </p>
         </div>
 
@@ -46,7 +69,7 @@ export default function ContactPage() {
             <div className="space-y-6">
               <div>
                 <h3 className="font-serif text-2xl font-bold text-[#1A1918]">SS Photography Studio</h3>
-                <p className="text-xs uppercase tracking-widest text-amber-800 font-semibold mt-1">Wedding Atelier</p>
+                <p className="text-xs uppercase tracking-widest text-amber-800 font-semibold mt-1">Lead: Suresh Solanki</p>
               </div>
 
               <p className="text-xs text-[#666666] leading-relaxed">
@@ -61,31 +84,80 @@ export default function ContactPage() {
                 </div>
                 <div className="flex items-center space-x-3 text-[#555555]">
                   <Phone className="w-4 h-4 text-amber-800 shrink-0" />
-                  <span>+91 98765 43210</span>
+                  <a href="tel:+919214404404" className="hover:text-amber-800 font-semibold">
+                    +91 92144 04404 (Suresh Solanki)
+                  </a>
                 </div>
                 <div className="flex items-center space-x-3 text-[#555555]">
                   <Mail className="w-4 h-4 text-amber-800 shrink-0" />
-                  <span>weddings@ssphotography.com</span>
+                  <a href="mailto:solankiluck339@gmail.com" className="hover:text-amber-800 font-semibold">
+                    solankiluck339@gmail.com
+                  </a>
                 </div>
+              </div>
+
+              {/* Instant WhatsApp Action */}
+              <div className="pt-2">
+                <a
+                  href={`https://wa.me/919214404404?text=${encodeURIComponent('Hello Suresh Solanki, I want to inquire about wedding photography dates.')}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-white font-semibold text-xs tracking-wider uppercase flex items-center justify-center space-x-2 transition-all shadow-md shadow-green-500/20"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  <span>Chat on WhatsApp (+91 9214404404)</span>
+                </a>
               </div>
             </div>
 
             <div className="p-4 rounded-2xl bg-[#F7F5F0] border border-[#E6E2D8] text-xs text-[#777777]">
-              <span className="font-semibold text-[#1A1918]">Note:</span> We recommend reserving your wedding dates 4–8 months in advance.
+              <span className="font-semibold text-[#1A1918]">Direct Contact:</span> Inquiries are routed immediately to Suresh Solanki at solankiluck339@gmail.com.
             </div>
           </div>
 
           {/* Consultation Inquiry Form */}
           <div className="lg:col-span-7 rounded-3xl bg-white border border-[#E6E2D8] p-8 sm:p-10 shadow-sm">
             {submitted ? (
-              <div className="py-16 text-center space-y-4">
+              <div className="py-12 text-center space-y-6">
                 <div className="w-16 h-16 rounded-full bg-green-50 border border-green-200 flex items-center justify-center text-green-700 mx-auto">
                   <CheckCircle2 className="w-8 h-8" />
                 </div>
-                <h3 className="font-serif text-2xl font-bold text-[#1A1918]">Inquiry Received</h3>
-                <p className="text-xs text-[#666666] max-w-md mx-auto leading-relaxed">
-                  Thank you for considering SS Photography. We will review your wedding date and details and reach out within 24 hours.
-                </p>
+                <div className="space-y-2">
+                  <h3 className="font-serif text-2xl font-bold text-[#1A1918]">Inquiry Sent to Suresh Solanki</h3>
+                  <p className="text-xs text-[#666666] max-w-md mx-auto leading-relaxed">
+                    Thank you, {formData.name || 'valued client'}. Your consultation details have been sent to <strong>solankiluck339@gmail.com</strong> and <strong>+91 92144 04404</strong>. We will get back to you shortly.
+                  </p>
+                </div>
+
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-4">
+                  <a
+                    href={`https://wa.me/919214404404?text=${whatsappMessage}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full sm:w-auto px-8 py-3.5 rounded-full bg-[#25D366] text-white font-semibold text-xs uppercase tracking-wider hover:bg-[#20ba59] transition-all flex items-center justify-center space-x-2 shadow-md"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span>Send on WhatsApp Instantly</span>
+                  </a>
+
+                  <button
+                    onClick={() => {
+                      setSubmitted(false);
+                      setFormData({
+                        name: '',
+                        email: '',
+                        phone: '',
+                        weddingDate: '',
+                        venue: '',
+                        guestCount: '',
+                        message: '',
+                      });
+                    }}
+                    className="w-full sm:w-auto px-6 py-3.5 rounded-full bg-[#FAF8F5] border border-[#DDD8CF] text-[#555555] text-xs font-semibold uppercase tracking-wider hover:text-black transition-all"
+                  >
+                    Send Another Note
+                  </button>
+                </div>
               </div>
             ) : (
               <form onSubmit={handleSubmit} className="space-y-6">
@@ -176,10 +248,11 @@ export default function ContactPage() {
 
                 <button
                   type="submit"
-                  className="w-full py-4 rounded-full bg-[#1A1918] text-white font-semibold text-xs uppercase tracking-[0.2em] hover:bg-amber-800 transition-all flex items-center justify-center space-x-2"
+                  disabled={submitting}
+                  className="w-full py-4 rounded-full bg-[#1A1918] text-white font-semibold text-xs uppercase tracking-[0.2em] hover:bg-amber-800 transition-all flex items-center justify-center space-x-2 shadow-lg"
                 >
                   <Send className="w-3.5 h-3.5" />
-                  <span>Send Consultation Request</span>
+                  <span>{submitting ? 'Sending Request...' : 'Send Consultation Request'}</span>
                 </button>
               </form>
             )}

@@ -496,55 +496,44 @@ export default function GuestEventPage({ params }: { params: { id: string } }) {
           )}
         </section>
 
-        {/* Gallery Navigation Tabs */}
+        {/* Private Matched Gallery Header */}
         <div className="flex items-center justify-between border-b border-[#222222] pb-4">
-          <div className="flex items-center space-x-6">
-            {searchStep === 'RESULTS' && matchedPhotos.length > 0 && (
-              <button
-                onClick={() => setActiveTab('MATCHES')}
-                className={`font-serif text-lg font-bold pb-2 relative transition-colors ${
-                  activeTab === 'MATCHES' ? 'text-brand-400' : 'text-[#666666] hover:text-white'
-                }`}
-              >
-                My Photos ({matchedPhotos.length})
-                {activeTab === 'MATCHES' && (
-                  <span className="absolute bottom-0 left-0 w-full h-[2px] bg-brand-400" />
-                )}
-              </button>
-            )}
-
-            <button
-              onClick={() => setActiveTab('ALL')}
-              className={`font-serif text-lg font-bold pb-2 relative transition-colors ${
-                activeTab === 'ALL' || searchStep !== 'RESULTS' || matchedPhotos.length === 0
-                  ? 'text-brand-400'
-                  : 'text-[#666666] hover:text-white'
-              }`}
-            >
-              All Wedding Photos ({event.photos.length})
-              {(activeTab === 'ALL' || searchStep !== 'RESULTS' || matchedPhotos.length === 0) && (
-                <span className="absolute bottom-0 left-0 w-full h-[2px] bg-brand-400" />
-              )}
-            </button>
+          <div className="flex items-center space-x-3">
+            <span className="font-serif text-lg font-bold text-amber-400">
+              {searchStep === 'RESULTS'
+                ? `Your Matched Photos (${matchedPhotos.length})`
+                : 'Personalized Guest Gallery'}
+            </span>
           </div>
 
           <span className="text-[11px] text-[#666666] uppercase tracking-widest hidden sm:inline">
-            Nikon D750 Ingestion
+            Private Face Match
           </span>
         </div>
 
-        {/* Gallery Photo Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-          {(activeTab === 'MATCHES' && matchedPhotos.length > 0 ? matchedPhotos : event.photos).length === 0 ? (
-            <div className="col-span-full py-16 text-center space-y-3 rounded-2xl bg-[#141414] border border-[#222222]">
-              <Camera className="w-8 h-8 text-amber-400 mx-auto" />
-              <h4 className="text-sm font-semibold text-white">No Wedding Photos Uploaded Yet</h4>
-              <p className="text-xs text-[#888888] max-w-sm mx-auto">
-                The photographer is currently documenting this event on the Nikon D750. Photos will appear here as they are ingested!
-              </p>
+        {/* Gallery Photo Grid — Strict Privacy: Only matched photos are shown */}
+        {searchStep !== 'RESULTS' ? (
+          <div className="py-16 px-6 text-center space-y-4 rounded-3xl bg-[#141414] border border-[#222222] max-w-2xl mx-auto shadow-xl">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 mx-auto">
+              <ShieldCheck className="w-7 h-7" />
             </div>
-          ) : (
-            (activeTab === 'MATCHES' && matchedPhotos.length > 0 ? matchedPhotos : event.photos).map((photo) => (
+            <h4 className="font-serif text-2xl font-bold text-white">Private Photo Delivery</h4>
+            <p className="text-xs sm:text-sm text-[#888888] max-w-md mx-auto leading-relaxed">
+              For complete privacy of the wedding couple and attendees, this gallery is strictly personalized. 
+              Take a live selfie or upload your picture above to discover and download only the photographs you appear in.
+            </p>
+          </div>
+        ) : matchedPhotos.length === 0 ? (
+          <div className="py-16 text-center space-y-3 rounded-2xl bg-[#141414] border border-[#222222]">
+            <Camera className="w-8 h-8 text-amber-400 mx-auto" />
+            <h4 className="text-sm font-semibold text-white">No Matching Photos Found</h4>
+            <p className="text-xs text-[#888888] max-w-sm mx-auto">
+              We couldn't detect your face in the current wedding pictures. Please try another clear selfie with good lighting, or check back soon as more captures are uploaded!
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+            {matchedPhotos.map((photo) => (
               <div
                 key={photo.id}
                 className="group relative rounded-xl overflow-hidden bg-[#141414] border border-[#222222] aspect-square cursor-pointer"
@@ -580,9 +569,9 @@ export default function GuestEventPage({ params }: { params: { id: string } }) {
                   </button>
                 </div>
               </div>
-            ))
-          )}
-        </div>
+            ))}
+          </div>
+        )}
       </main>
 
       {/* Lightbox High-Resolution Modal */}
