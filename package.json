@@ -12,6 +12,7 @@
     "db:generate": "prisma generate",
     "db:seed": "node --loader ts-node/esm prisma/seed.ts",
     "uploader": "node uploader/watch-uploader.mjs",
+    "uploader:install-startup": "node scripts/install-uploader-startup.cjs",
     "tunnel": "npx localtunnel --port 3000",
     "live": "node scripts/start-live-platform.cjs",
     "test": "node tests/run-all.cjs"

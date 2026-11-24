@@ -68,43 +68,96 @@ export async function GET(req: NextRequest) {
 export async function DELETE(req: NextRequest) {
   try {
     const admin = await requireAdminFromRequest(req);
-    if (!admin) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    const ingestKeyHeader = req.headers.get('x-camera-ingest-key');
+    const validIngestKey = process.env.CAMERA_INGEST_API_KEY || 'ss_cam_ingest_key_wedding_2026';
+
+    const isAuthorized = !!admin || (ingestKeyHeader && ingestKeyHeader === validIngestKey);
+    if (!isAuthorized) {
+      return NextResponse.json({ error: 'Unauthorized: Admin or camera key required' }, { status: 401 });
     }
 
-    const { id } = await req.json();
-    if (!id) {
-      return NextResponse.json({ error: 'Photo ID is required' }, { status: 400 });
+    const body = await req.json();
+    const { id, filename, eventId } = body;
+
+    if (!id && !filename) {
+      return NextResponse.json({ error: 'Photo ID or filename is required' }, { status: 400 });
     }
 
-    const photo = await prisma.photo.findUnique({
-      where: { id },
-    });
+    let photosToDelete: any[] = [];
 
-    if (!photo) {
-      return NextResponse.json({ error: 'Photo not found' }, { status: 404 });
+    if (id) {
+      const photo = await prisma.photo.findUnique({
+        where: { id },
+      });
+      if (photo) photosToDelete.push(photo);
+    } else if (filename) {
+      // Resolve event if eventId provided (slug or cuid)
+      let resolvedEventId = eventId;
+      if (eventId) {
+        const ev = await prisma.event.findFirst({
+          where: { OR: [{ id: eventId }, { slug: eventId }] },
+          select: { id: true },
+        });
+        if (ev) resolvedEventId = ev.id;
+      }
+
+      const whereClause: any = { filename };
+      if (resolvedEventId) {
+        whereClause.eventId = resolvedEventId;
+      }
+
+      photosToDelete = await prisma.photo.findMany({
+        where: whereClause,
+      });
+
+      // Fallback: check if stored filename ends with the target filename
+      if (photosToDelete.length === 0) {
+        photosToDelete = await prisma.photo.findMany({
+          where: {
+            filename: {
+              endsWith: filename,
+            },
+            ...(resolvedEventId ? { eventId: resolvedEventId } : {}),
+          },
+        });
+      }
     }
 
-    // Clean up local/cloud files
-    await StorageService.deleteFile(photo.originalUrl);
-    await StorageService.deleteFile(photo.previewUrl);
-    await StorageService.deleteFile(photo.thumbnailUrl);
+    if (photosToDelete.length === 0) {
+      return NextResponse.json({ error: 'Photo not found', deletedCount: 0 }, { status: 404 });
+    }
 
-    // Decrement event storage usage
-    await prisma.event.update({
-      where: { id: photo.eventId },
-      data: {
-        usedStorageBytes: {
-          decrement: BigInt(photo.fileSize),
-        },
-      },
-    });
+    let deletedCount = 0;
+    const deletedIds: string[] = [];
 
-    await prisma.photo.delete({
-      where: { id },
-    });
+    for (const photo of photosToDelete) {
+      // Clean up files across local disk, S3, and Google Drive
+      await StorageService.deleteFile(photo.originalUrl);
+      await StorageService.deleteFile(photo.previewUrl);
+      await StorageService.deleteFile(photo.thumbnailUrl);
 
-    return NextResponse.json({ success: true });
+      // Decrement event storage usage
+      await prisma.event
+        .update({
+          where: { id: photo.eventId },
+          data: {
+            usedStorageBytes: {
+              decrement: BigInt(photo.fileSize),
+            },
+          },
+        })
+        .catch(() => {});
+
+      // Delete from Prisma (cascades to face embeddings)
+      await prisma.photo.delete({
+        where: { id: photo.id },
+      });
+
+      deletedCount++;
+      deletedIds.push(photo.id);
+    }
+
+    return NextResponse.json({ success: true, deletedCount, deletedIds });
   } catch (err: any) {
     console.error('Delete photo error:', err);
     return NextResponse.json({ error: 'Failed to delete photo' }, { status: 500 });

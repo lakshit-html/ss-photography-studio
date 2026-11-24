@@ -219,6 +219,7 @@ class NikonCameraUploader {
 
     watcher
       .on('add', (filePath) => this.handleNewFile(filePath))
+      .on('unlink', (filePath) => this.handleDeletedFile(filePath))
       .on('error', (err) => {
         if (err.code === 'EBUSY') return; // Handled gracefully by polling
         console.warn('[WATCHER NOTICE]', err.message || err);
@@ -229,6 +230,50 @@ class NikonCameraUploader {
         // Process any recovered queue items
         if (this.queue.length > 0) this.processQueue();
       });
+  }
+
+  async handleDeletedFile(filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (!['.jpg', '.jpeg', '.png', '.nef', '.webp'].includes(ext)) return;
+
+    const filename = path.basename(filePath);
+
+    // 1. Purge from local pending queue if not yet processed
+    const originalLen = this.queue.length;
+    this.queue = this.queue.filter((q) => q.filePath !== filePath && q.filename !== filename);
+    if (this.queue.length !== originalLen) {
+      this.saveQueueToDisk();
+      this.log(`[QUEUE PURGED] Cancelled pending ingest for deleted file: ${filename}`);
+    }
+
+    // 2. Request website / cloud API to delete photo from live gallery & Google Drive
+    this.log(`[LOCAL DELETION DETECTED] ${filename} removed from tether inbox. Syncing removal to website...`);
+
+    try {
+      const response = await fetch(`${this.config.serverUrl}/api/photos`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-camera-ingest-key': this.config.apiKey,
+        },
+        body: JSON.stringify({
+          filename,
+          eventId: this.config.eventId,
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        this.log(`🗑 [AUTO-REMOVED] ${filename} deleted from live website and cloud storage.`);
+      } else if (response.status === 404) {
+        this.log(`[DELETE SYNC] ${filename} not found on website (already deleted or not yet uploaded).`);
+      } else {
+        const errData = await response.json().catch(() => ({}));
+        this.log(`[DELETE WARNING] Could not remove ${filename} from website: ${errData.error || response.statusText}`);
+      }
+    } catch (delErr) {
+      this.log(`[DELETE ERROR] Server unreachable when deleting ${filename}: ${delErr.message}`);
+    }
   }
 
   async handleNewFile(filePath) {

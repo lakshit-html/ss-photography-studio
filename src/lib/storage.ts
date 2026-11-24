@@ -313,18 +313,36 @@ export class StorageService {
   }
 
   /**
-   * Deletes a file from storage safely across all locations
+   * Deletes a file from storage safely across all locations (Local disk, Google Drive, DBByte S3)
    */
   public static async deleteFile(fileUrl: string): Promise<boolean> {
     try {
+      if (!fileUrl) return false;
+
+      // 1. Delete from Google Drive if URL points to Google Drive
+      if (fileUrl.includes('/api/photos/gdrive/')) {
+        const match = fileUrl.match(/\/api\/photos\/gdrive\/([^/?#&]+)/);
+        if (match && match[1]) {
+          const driveFileId = match[1];
+          try {
+            if (GoogleDriveAdapter.isConfigured()) {
+              await GoogleDriveAdapter.deleteFile(driveFileId);
+            }
+          } catch (gErr: any) {
+            console.warn(`[Google Drive Delete Notice] File ID ${driveFileId}: ${gErr.message}`);
+          }
+        }
+      }
+
+      // 2. Delete local public upload file
       if (fileUrl.startsWith('/uploads/')) {
         const relativePath = fileUrl.replace('/uploads/', '');
         const fullPath = path.join(this.getPublicBaseDir(), relativePath);
         if (fs.existsSync(fullPath)) {
-          await fs.promises.unlink(fullPath);
+          await fs.promises.unlink(fullPath).catch(() => {});
         }
         if (S3StorageAdapter.isConfigured()) {
-          await S3StorageAdapter.delete(relativePath.replace(/\\/g, '/'));
+          await S3StorageAdapter.delete(relativePath.replace(/\\/g, '/')).catch(() => {});
         }
         return true;
       } else if (fileUrl.startsWith('/api/photos/original')) {
@@ -339,17 +357,17 @@ export class StorageService {
           const legacyPath = path.join(this.getPrivateBaseDir(), sanitizedEvent, sanitizedFile);
 
           if (fs.existsSync(primaryPath)) {
-            await fs.promises.unlink(primaryPath);
+            await fs.promises.unlink(primaryPath).catch(() => {});
           } else if (fs.existsSync(legacyPath)) {
-            await fs.promises.unlink(legacyPath);
+            await fs.promises.unlink(legacyPath).catch(() => {});
           }
           if (S3StorageAdapter.isConfigured()) {
-            await S3StorageAdapter.delete(`${sanitizedEvent}/originals/${sanitizedFile}`);
+            await S3StorageAdapter.delete(`${sanitizedEvent}/originals/${sanitizedFile}`).catch(() => {});
           }
           return true;
         }
       }
-      return false;
+      return true;
     } catch (err) {
       console.error('Failed to delete file:', err);
       return false;
