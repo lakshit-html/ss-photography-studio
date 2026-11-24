@@ -1,0 +1,40 @@
+# Dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# Testing & Artifacts
+/coverage
+*.log
+*.zip
+
+# Next.js Build Outputs
+/.next/
+/out/
+/.firebase/
+
+# Production & Environment Variables
+.env
+.env*.local
+.env.production
+.env.development
+
+# SQLite Database & Storage
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/storage/events/*
+!/storage/events/.gitkeep
+/public/uploads/*
+!/public/uploads/.gitkeep
+/tether_inbox/*
+!/tether_inbox/.gitkeep
+
+# Executables & Binaries
+/bin/cloudflared.exe
+*.exe
+
+# OS Files
+.DS_Store
+Thumbs.db

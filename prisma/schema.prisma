@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Event {
+  id                      String         @id @default(cuid())
+  title                   String
+  slug                    String         @unique
+  brideName               String?
+  groomName               String?
+  eventDate               DateTime
+  location                String?
+  coverPhoto              String?
+  description             String?
+  isPublic                Boolean        @default(true)
+  password                String?
+  status                  String         @default("ACTIVE") // ACTIVE, DRAFT, ARCHIVED
+  allowGuestDownloads     Boolean        @default(true)
+  downloadWatermarkedOnly Boolean        @default(false)
+  maxStorageMB            Int            @default(10000)
+  usedStorageBytes        BigInt         @default(0)
+  qrCodeDataUrl           String?
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+  photos                  Photo[]
+  ingestionLogs           IngestionLog[]
+}
+
+model Photo {
+  id           String          @id @default(cuid())
+  eventId      String
+  event        Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  originalUrl  String
+  previewUrl   String
+  thumbnailUrl String
+  filename     String
+  fileSize     Int
+  width        Int?
+  height       Int?
+  format       String?
+  sha256       String
+  faceCount    Int             @default(0)
+  source       String          @default("MANUAL") // CAMERA_TETHER, MANUAL, WATCHER
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  faces        FaceEmbedding[]
+
+  @@index([eventId])
+  @@index([sha256])
+}
+
+model FaceEmbedding {
+  id             String   @id @default(cuid())
+  photoId        String
+  photo          Photo    @relation(fields: [photoId], references: [id], onDelete: Cascade)
+  eventId        String
+  boundingBox    String   // JSON string: { "x": 0.1, "y": 0.2, "width": 0.15, "height": 0.15 }
+  embedding      String   // JSON array string: "[0.12, -0.45, ... 128 floats]"
+  externalFaceId String?
+  confidence     Float    @default(1.0)
+  createdAt      DateTime @default(now())
+
+  @@index([eventId])
+  @@index([photoId])
+}
+
+model WatermarkSettings {
+  id                    String   @id @default("default")
+  logoUrl               String?
+  opacity               Float    @default(0.7)
+  sizePercentage        Int      @default(15) // percentage of image width
+  position              String   @default("BOTTOM_RIGHT") // BOTTOM_RIGHT, BOTTOM_LEFT, TOP_RIGHT, TOP_LEFT, CENTER
+  applyToAll            Boolean  @default(true)
+  allowOriginalDownload Boolean  @default(true)
+  updatedAt             DateTime @updatedAt
+}
+
+model IngestionLog {
+  id           String   @id @default(cuid())
+  eventId      String
+  event        Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  filename     String
+  fileSize     Int
+  status       String   // SUCCESS, DUPLICATE, FAILED
+  errorMessage String?
+  sourceDevice String   @default("Nikon D750")
+  createdAt    DateTime @default(now())
+
+  @@index([eventId])
+}
+
+model AdminUser {
+  id           String   @id @default("admin_1")
+  email        String   @unique
+  passwordHash String
+  name         String   @default("SS Photography Studio")
+  createdAt    DateTime @default(now())
+}

@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if the caller is an authenticated studio admin
+    function isAdmin() {
+      return request.auth != null && (request.auth.token.admin == true || request.auth.token.role == 'admin');
+    }
+
+    // 1. Events Collection
+    match /events/{eventId} {
+      // Public guest read for active weddings, Admin full access
+      allow read: if resource.data.status == 'ACTIVE' || isAdmin();
+      allow write: if isAdmin();
+
+      // 2. Photos Subcollection
+      match /photos/{photoId} {
+        // Public guest read if the wedding event is active, Admin full access
+        allow read: if get(/databases/$(database)/documents/events/$(eventId)).data.status == 'ACTIVE' || isAdmin();
+        allow write: if isAdmin();
+      }
+
+      // 3. Face Embeddings Subcollection (CRITICAL BIOMETRIC PRIVACY)
+      // Guests can NEVER query or download raw 128D face vectors directly from the browser!
+      // All facial discovery matching runs through the authenticated backend API
+      match /face_embeddings/{embeddingId} {
+        allow read, write: if isAdmin();
+      }
+    }
+
+    // 4. Studio Watermark Branding Settings
+    match /watermark_settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // 5. Ingestion Logs (Internal telemetry)
+    match /ingestion_logs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    // 6. Admin Users (Studio credentials)
+    match /admin_users/{userId} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

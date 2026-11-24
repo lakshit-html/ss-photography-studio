@@ -1,0 +1,11 @@
+node_modules
+.next
+storage
+tether_inbox
+.git
+*.log
+uploader/*.json
+dev.db
+dev.db-journal
+tests/fixtures
+SS-Photography-Platform.zip

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: ss-photography-studio
+    env: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npx prisma generate && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/branding
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        value: file:./dev.db
+      - key: STORAGE_PROVIDER
+        value: gdrive
+      - key: GDRIVE_CLIENT_ID
+        sync: false
+      - key: GDRIVE_CLIENT_SECRET
+        sync: false
+      - key: GDRIVE_REFRESH_TOKEN
+        sync: false
+      - key: GDRIVE_ROOT_FOLDER_ID
+        value: 1IZjTg6RbSLAkh6jv6h-Ueb59HW84iLTw
+      - key: CAMERA_INGEST_API_KEY
+        value: ss_cam_ingest_key_wedding_2026
+      - key: ADMIN_EMAIL
+        value: admin@ssphotography.com
+      - key: ADMIN_JWT_SECRET
+        generateValue: true
