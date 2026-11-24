@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import os from 'os';
 import {
   S3Client,
   PutObjectCommand,
@@ -37,9 +38,17 @@ const PUBLIC_UPLOAD_DIR = process.env.STORAGE_PUBLIC_DIR || './public/uploads';
 // Private directory outside public web root for uncompressed, un-watermarked high-res originals
 const PRIVATE_STORAGE_DIR = process.env.STORAGE_PRIVATE_DIR || './storage/events';
 
+function isServerless(): boolean {
+  return !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.VERCEL_ENV);
+}
+
 function ensureDirectoryExists(dirPath: string) {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true });
+  try {
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+  } catch (err: any) {
+    // Non-fatal if filesystem is read-only (e.g. AWS Lambda / Vercel /var/task)
   }
 }
 
@@ -188,12 +197,22 @@ export class S3StorageAdapter {
  */
 export class StorageService {
   public static getPublicBaseDir(): string {
+    if (isServerless()) {
+      const tmpDir = path.join(os.tmpdir(), 'ss-photography', 'public_uploads');
+      ensureDirectoryExists(tmpDir);
+      return tmpDir;
+    }
     const fullPath = path.resolve(process.cwd(), PUBLIC_UPLOAD_DIR);
     ensureDirectoryExists(fullPath);
     return fullPath;
   }
 
   public static getPrivateBaseDir(): string {
+    if (isServerless()) {
+      const tmpDir = path.join(os.tmpdir(), 'ss-photography', 'private_events');
+      ensureDirectoryExists(tmpDir);
+      return tmpDir;
+    }
     const fullPath = path.resolve(process.cwd(), PRIVATE_STORAGE_DIR);
     ensureDirectoryExists(fullPath);
     return fullPath;
@@ -217,29 +236,33 @@ export class StorageService {
     let publicUrl = '';
     let protectedUrl = '';
 
-    if (category === 'originals') {
-      // ORIGINALS: Saved in private directory outside public/
-      const privateEventDir = path.join(this.getPrivateBaseDir(), eventId, 'originals');
-      ensureDirectoryExists(privateEventDir);
-      localFilePath = path.join(privateEventDir, safeFilename);
+    try {
+      if (category === 'originals') {
+        // ORIGINALS: Saved in private directory outside public/
+        const privateEventDir = path.join(this.getPrivateBaseDir(), eventId, 'originals');
+        ensureDirectoryExists(privateEventDir);
+        localFilePath = path.join(privateEventDir, safeFilename);
 
-      await fs.promises.writeFile(localFilePath, buffer);
-      protectedUrl = `/api/photos/original?event=${eventId}&file=${encodeURIComponent(safeFilename)}`;
-    } else {
-      // PREVIEWS & THUMBNAILS: Saved in public/uploads for local web delivery
-      const publicEventDir = path.join(this.getPublicBaseDir(), eventId, category);
-      ensureDirectoryExists(publicEventDir);
-      localFilePath = path.join(publicEventDir, safeFilename);
+        await fs.promises.writeFile(localFilePath, buffer);
+        protectedUrl = `/api/photos/original?event=${eventId}&file=${encodeURIComponent(safeFilename)}`;
+      } else {
+        // PREVIEWS & THUMBNAILS: Saved in public/uploads for local web delivery
+        const publicEventDir = path.join(this.getPublicBaseDir(), eventId, category);
+        ensureDirectoryExists(publicEventDir);
+        localFilePath = path.join(publicEventDir, safeFilename);
 
-      await fs.promises.writeFile(localFilePath, buffer);
-      publicUrl = `/uploads/${eventId}/${category}/${safeFilename}`;
+        await fs.promises.writeFile(localFilePath, buffer);
+        publicUrl = `/uploads/${eventId}/${category}/${safeFilename}`;
+      }
+    } catch (localWriteErr: any) {
+      console.warn(`[Storage Warning] Local scratch write notice: ${localWriteErr.message}`);
     }
 
     // 2. Cloud Mirror Sync (Google Drive, DBByte S3, or Supabase)
-    const provider = process.env.STORAGE_PROVIDER || 'local';
+    const provider = process.env.STORAGE_PROVIDER || 'gdrive';
     let gdriveFileId: string | undefined;
 
-    if (provider === 'gdrive' && GoogleDriveAdapter.isConfigured()) {
+    if (GoogleDriveAdapter.isConfigured()) {
       try {
         const hierarchy = await GoogleDriveAdapter.ensureEventHierarchy(eventId);
         let targetFolderId = hierarchy.eventFolderId;
@@ -271,6 +294,13 @@ export class StorageService {
       } catch (cloudErr: any) {
         console.warn(`[Supabase Warning] Could not sync to Supabase (${cloudErr.message}). Local copy preserved safely.`);
       }
+    }
+
+    if (!publicUrl) {
+      publicUrl = `/api/photos/original?event=${eventId}&file=${encodeURIComponent(safeFilename)}`;
+    }
+    if (!protectedUrl) {
+      protectedUrl = publicUrl;
     }
 
     return {
