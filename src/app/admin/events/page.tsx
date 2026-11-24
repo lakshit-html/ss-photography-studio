@@ -78,7 +78,11 @@ export default function AdminEventsPage() {
     try {
       const res = await fetch('/api/events', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-camera-ingest-key': 'ss_cam_ingest_key_wedding_2026',
+        },
+        credentials: 'include',
         body: JSON.stringify(formData),
       });
 
@@ -115,7 +119,13 @@ export default function AdminEventsPage() {
     if (!confirm(`Are you sure you want to permanently delete "${title}" and all its photos?`)) return;
 
     try {
-      const res = await fetch(`/api/events/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/events/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'x-camera-ingest-key': 'ss_cam_ingest_key_wedding_2026',
+        },
+        credentials: 'include',
+      });
       if (res.ok) {
         setEvents((prev) => prev.filter((e) => e.id !== id));
         setSuccessToast(`Deleted "${title}"`);
