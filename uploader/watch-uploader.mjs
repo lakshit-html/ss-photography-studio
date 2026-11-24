@@ -36,7 +36,8 @@ function parseArgs() {
   if (!eventId && fs.existsSync(CONFIG_FILE)) {
     try {
       const activeCfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-      if (activeCfg.eventId) eventId = activeCfg.eventId;
+      if (activeCfg.activeEventId) eventId = activeCfg.activeEventId;
+      else if (activeCfg.eventId) eventId = activeCfg.eventId;
     } catch {}
   }
 

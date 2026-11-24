@@ -191,9 +191,32 @@ async function main() {
 
   const tunnel = startTunnel();
 
+  // 3. Start Camera Tethering Watcher automatically (Zero manual start needed!)
+  console.log('Starting automated Camera Tethering Watcher for "tether_inbox"...');
+  const uploaderScript = path.join(__dirname, '..', 'uploader', 'watch-uploader.mjs');
+  const uploaderProcess = spawn(process.execPath, [uploaderScript], {
+    cwd: path.join(__dirname, '..'),
+    stdio: 'pipe',
+  });
+
+  uploaderProcess.stdout.on('data', (d) => {
+    const text = d.toString().trim();
+    if (text) console.log(`[Camera Ingestion] ${text}`);
+  });
+
+  uploaderProcess.stderr.on('data', (d) => {
+    const text = d.toString().trim();
+    if (text && !text.includes('ExperimentalWarning')) {
+      console.error(`[Camera Ingestion] ${text}`);
+    }
+  });
+
   process.on('SIGINT', () => {
-    console.log('\nShutting down live server and tunnel...');
+    console.log('\nShutting down live server, tunnel, and camera watcher...');
     try { tunnel.kill(); } catch {}
+    if (uploaderProcess) {
+      try { uploaderProcess.kill(); } catch {}
+    }
     if (nextProcess) {
       try { nextProcess.kill(); } catch {}
     }
