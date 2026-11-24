@@ -30,28 +30,40 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No image file provided' }, { status: 400 });
     }
 
-    // If eventId wasn't specified, route automatically to the most recent active event
-    if (!eventId) {
-      const activeEvent = await prisma.event.findFirst({
+    // 1. Resolve target event with bulletproof fallback
+    let event = eventId
+      ? await prisma.event.findFirst({
+          where: {
+            OR: [{ id: eventId }, { slug: eventId }],
+          },
+        })
+      : null;
+
+    if (!event) {
+      event = await prisma.event.findFirst({
         where: { status: 'ACTIVE' },
         orderBy: { eventDate: 'desc' },
       });
-      if (!activeEvent) {
-        return NextResponse.json(
-          { error: 'No active wedding event found to ingest photograph' },
-          { status: 404 }
-        );
-      }
-      eventId = activeEvent.id;
     }
 
-    // Verify event exists
-    const event = await prisma.event.findUnique({
-      where: { id: eventId },
-    });
     if (!event) {
-      return NextResponse.json({ error: 'Target event not found' }, { status: 404 });
+      event = await prisma.event.findFirst({
+        orderBy: { eventDate: 'desc' },
+      });
     }
+
+    if (!event) {
+      event = await prisma.event.create({
+        data: {
+          title: 'Wedding Celebration',
+          slug: 'reception',
+          eventDate: new Date(),
+          status: 'ACTIVE',
+        },
+      });
+    }
+
+    eventId = event.id;
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const originalFilename = file.name || `DSC_${Date.now()}.jpg`;

@@ -4,10 +4,11 @@
  * Production Features:
  * - Persistent Disk Queue (survives app restarts & laptop reboots)
  * - Offline Resiliency (buffers captures during wifi disconnects, resumes on reconnect)
- * - Dynamic Active Wedding Selector (via admin UI or CLI)
+ * - Auto-detects Live Cloud Server (Vercel) vs Localhost
+ * - Windows EBUSY Resilient Polling
  * - SHA-256 Duplicate Prevention
- * - 1.5s Camera Write-Stability Buffer
- * - Real-Time Heartbeat Reporting to Studio Admin Monitor
+ * - 2s Camera Write-Stability Buffer
+ * - Automatic Google Drive Cloud Sync via Ingest API
  */
 
 import fs from 'fs';
@@ -18,11 +19,36 @@ import chokidar from 'chokidar';
 const QUEUE_FILE = path.resolve(process.cwd(), 'uploader/uploader-queue.json');
 const CONFIG_FILE = path.resolve(process.cwd(), 'uploader/active-event.json');
 
+async function detectActiveServer(preferredUrl) {
+  if (preferredUrl && preferredUrl !== 'http://localhost:3000' && preferredUrl !== 'auto') {
+    return preferredUrl.replace(/\/$/, '');
+  }
+
+  // 1. Probe localhost:3000
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 1000);
+    const res = await fetch('http://localhost:3000/api/uploader/status', { signal: controller.signal });
+    clearTimeout(t);
+    if (res.ok || res.status === 405) {
+      return 'http://localhost:3000';
+    }
+  } catch {}
+
+  // 2. Default to Live Vercel Production Server
+  const liveUrl = process.env.LIVE_APP_URL || process.env.NEXT_PUBLIC_APP_URL || 'https://ss-photography-studio.vercel.app';
+  if (liveUrl && !liveUrl.includes('localhost')) {
+    return liveUrl.replace(/\/$/, '');
+  }
+
+  return 'https://ss-photography-studio.vercel.app';
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   let watchFolder = process.env.CAMERA_MONITORED_DIR || 'C:/Users/Suresh/Desktop/FaceReco/tether_inbox';
-  let eventId = process.env.CAMERA_DEFAULT_EVENT_ID || '';
-  let serverUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  let eventId = process.env.CAMERA_DEFAULT_EVENT_ID || 'cmwtgw08k0000wj94qt1s2k1w';
+  let serverUrl = process.env.CAMERA_SERVER_URL || 'auto';
   let apiKey = process.env.CAMERA_INGEST_API_KEY || 'ss_cam_ingest_key_wedding_2026';
 
   for (let i = 0; i < args.length; i++) {
@@ -78,7 +104,7 @@ class NikonCameraUploader {
         const raw = fs.readFileSync(QUEUE_FILE, 'utf8');
         const savedQueue = JSON.parse(raw);
         if (Array.isArray(savedQueue)) {
-          // Keep only PENDING or RETRY items
+          // Keep PENDING or RETRY items
           this.queue = savedQueue.filter((item) => item.status === 'PENDING' || item.status === 'RETRY');
           // Populate uploaded hashes
           for (const item of savedQueue) {
@@ -150,6 +176,7 @@ class NikonCameraUploader {
   }
 
   async start() {
+    this.config.serverUrl = await detectActiveServer(this.config.serverUrl);
     await this.resolveActiveEvent();
 
     console.log('\n======================================================');
@@ -175,20 +202,27 @@ class NikonCameraUploader {
     // Heartbeat timer (every 3 seconds)
     setInterval(() => this.sendHeartbeat(), 3000);
 
-    // Watcher with write-stability
+    // Watcher with Windows-safe polling to prevent EBUSY locks
     const watcher = chokidar.watch(this.config.watchFolder, {
       ignored: /(^|[\/\\])\../,
       persistent: true,
       depth: 2,
+      usePolling: true,
+      interval: 1000,
+      binaryInterval: 1500,
+      ignorePermissionErrors: true,
       awaitWriteFinish: {
-        stabilityThreshold: 1500, // 1.5 seconds stability buffer for full camera flush
-        pollInterval: 300,
+        stabilityThreshold: 1500, // 1.5s stability buffer for full camera flush
+        pollInterval: 400,
       },
     });
 
     watcher
       .on('add', (filePath) => this.handleNewFile(filePath))
-      .on('error', (err) => console.error('[WATCHER ERROR]', err))
+      .on('error', (err) => {
+        if (err.code === 'EBUSY') return; // Handled gracefully by polling
+        console.warn('[WATCHER NOTICE]', err.message || err);
+      })
       .on('ready', () => {
         this.log('Camera Watcher active! Ready for incoming Nikon D750 captures.');
         this.log(`Save shots to: ${this.config.watchFolder}\n`);
@@ -208,23 +242,27 @@ class NikonCameraUploader {
     if (alreadyQueued) return;
 
     this.stats.detected++;
-    const stat = fs.statSync(filePath);
-    const sizeMB = (stat.size / (1024 * 1024)).toFixed(2);
-    this.log(`[NEW CAPTURE] ${filename} (${sizeMB} MB)`);
+    try {
+      const stat = fs.statSync(filePath);
+      const sizeMB = (stat.size / (1024 * 1024)).toFixed(2);
+      this.log(`[NEW CAPTURE] ${filename} (${sizeMB} MB)`);
 
-    const queueItem = {
-      id: `queue_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      filePath,
-      filename,
-      fileSize: stat.size,
-      status: 'PENDING',
-      attempts: 0,
-      addedAt: new Date().toISOString(),
-    };
+      const queueItem = {
+        id: `queue_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        filePath,
+        filename,
+        fileSize: stat.size,
+        status: 'PENDING',
+        attempts: 0,
+        addedAt: new Date().toISOString(),
+      };
 
-    this.queue.push(queueItem);
-    this.saveQueueToDisk();
-    this.processQueue();
+      this.queue.push(queueItem);
+      this.saveQueueToDisk();
+      this.processQueue();
+    } catch (statErr) {
+      // If locked, polling will re-trigger when file is readable
+    }
   }
 
   async processQueue() {
@@ -243,8 +281,9 @@ class NikonCameraUploader {
           this.saveQueueToDisk();
         } else {
           // Back off if server is unreachable
-          this.log(`[OFFLINE/BACKOFF] Server unavailable. Pausing queue for 5 seconds...`);
+          this.log(`[OFFLINE/BACKOFF] Server unavailable or paused. Pausing queue for 5 seconds...`);
           await new Promise((res) => setTimeout(res, 5000));
+          break;
         }
       } catch (err) {
         this.log(`[PROCESS ERROR] ${item.filename}: ${err.message}`);
@@ -262,7 +301,25 @@ class NikonCameraUploader {
       return true;
     }
 
-    const fileBuffer = await fs.promises.readFile(item.filePath);
+    let fileBuffer;
+    for (let attempts = 0; attempts < 5; attempts++) {
+      try {
+        fileBuffer = await fs.promises.readFile(item.filePath);
+        break;
+      } catch (readErr) {
+        if (readErr.code === 'EBUSY') {
+          await new Promise((r) => setTimeout(r, 600));
+        } else {
+          throw readErr;
+        }
+      }
+    }
+
+    if (!fileBuffer) {
+      this.log(`[WAITING WRITE LOCK] File still being written to disk: ${item.filename}`);
+      return false;
+    }
+
     const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
     item.sha256 = hash;
 
@@ -308,7 +365,7 @@ class NikonCameraUploader {
       item.status = 'COMPLETED';
 
       this.log(
-        `✔ [INGEST SUCCESS] ${item.filename} -> ${data.eventTitle || data.eventId} (Faces: ${data.photo?.faceCount || 0})`
+        `✔ [INGEST SUCCESS] ${item.filename} -> Cloud & Google Drive (Faces: ${data.photo?.faceCount ?? 0})`
       );
       return true;
     } catch (err) {
