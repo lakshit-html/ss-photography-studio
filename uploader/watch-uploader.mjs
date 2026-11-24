@@ -227,9 +227,51 @@ class NikonCameraUploader {
       .on('ready', () => {
         this.log('Camera Watcher active! Ready for incoming Nikon D750 captures.');
         this.log(`Save shots to: ${this.config.watchFolder}\n`);
+        // Reconcile any files deleted while uploader was stopped
+        this.reconcileLocalFolderWithServer();
         // Process any recovered queue items
         if (this.queue.length > 0) this.processQueue();
       });
+  }
+
+  async reconcileLocalFolderWithServer() {
+    try {
+      if (!fs.existsSync(this.config.watchFolder)) return;
+      const localFiles = new Set(fs.readdirSync(this.config.watchFolder));
+
+      const res = await fetch(`${this.config.serverUrl}/api/photos?limit=200`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const serverPhotos = data.photos || [];
+
+      let prunedCount = 0;
+      for (const photo of serverPhotos) {
+        const isCameraPhoto = ['.jpg', '.jpeg', '.png', '.nef', '.webp'].some((ext) =>
+          photo.filename.toLowerCase().endsWith(ext)
+        );
+        if (
+          isCameraPhoto &&
+          !localFiles.has(photo.filename) &&
+          !photo.filename.startsWith('Screenshot_') &&
+          !photo.filename.startsWith('WIN_')
+        ) {
+          this.log(`[SYNC AUDIT] Deleting photo from web (missing locally): ${photo.filename}`);
+          const delRes = await fetch(`${this.config.serverUrl}/api/photos`, {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-camera-ingest-key': this.config.apiKey,
+            },
+            body: JSON.stringify({ id: photo.id, filename: photo.filename, eventId: this.config.eventId }),
+          });
+          if (delRes.ok) prunedCount++;
+        }
+      }
+
+      if (prunedCount > 0) {
+        this.log(`✔ [SYNC AUDIT COMPLETE] Removed ${prunedCount} stale photo(s) from cloud gallery.`);
+      }
+    } catch {}
   }
 
   async handleDeletedFile(filePath) {
