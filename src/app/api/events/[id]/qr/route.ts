@@ -23,7 +23,7 @@ export async function GET(
       return NextResponse.json({ error: 'Event not found' }, { status: 404 });
     }
 
-    const appUrl = getActiveGuestBaseUrl();
+    const appUrl = getActiveGuestBaseUrl(req);
     const eventUrl = `${appUrl}/event/${event.slug}`;
 
     if (format === 'poster') {

@@ -1,6 +1,7 @@
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { NextRequest } from 'next/server';
 
 export interface HostConfig {
   activeUrl: string;
@@ -21,7 +22,6 @@ export function getLocalIPv4(): string {
     const netList = interfaces[name];
     if (!netList) continue;
     for (const net of netList) {
-      // Pick IPv4 non-internal address (e.g. 192.168.x.x, 10.x.x.x, 172.x.x.x)
       if (net.family === 'IPv4' && !net.internal) {
         return net.address;
       }
@@ -33,13 +33,44 @@ export function getLocalIPv4(): string {
 /**
  * Returns current host and guest access configuration
  */
-export function getHostConfig(): HostConfig {
+export function getHostConfig(req?: NextRequest): HostConfig {
   const lanIp = getLocalIPv4();
   const defaultPort = 3000;
 
-  // 1. Explicit production HTTPS domain (Firebase Hosting / Custom Domain)
+  // 1. Dynamic request host detection (Vercel, custom domains, live cloud hosts)
+  if (req) {
+    const proto = req.headers.get('x-forwarded-proto') || 'https';
+    const host = req.headers.get('x-forwarded-host') || req.headers.get('host');
+    if (host && !host.includes('trycloudflare.com') && !host.includes('localhost') && !host.includes('127.0.0.1')) {
+      return {
+        activeUrl: `${proto}://${host}`,
+        mode: 'CUSTOM',
+        lanIp,
+        port: defaultPort,
+        lastUpdated: new Date().toISOString(),
+      };
+    }
+  }
+
+  // 2. Vercel environment URL
+  if (process.env.VERCEL_URL) {
+    return {
+      activeUrl: `https://${process.env.VERCEL_URL}`,
+      mode: 'CUSTOM',
+      lanIp,
+      port: defaultPort,
+      lastUpdated: new Date().toISOString(),
+    };
+  }
+
+  // 3. Explicit production HTTPS domain (Custom Domain / NEXT_PUBLIC_APP_URL)
   const productionDomain = process.env.PRODUCTION_PUBLIC_DOMAIN || process.env.NEXT_PUBLIC_APP_URL;
-  if (productionDomain && productionDomain.startsWith('https://') && !productionDomain.includes('localhost')) {
+  if (
+    productionDomain &&
+    productionDomain.startsWith('https://') &&
+    !productionDomain.includes('localhost') &&
+    !productionDomain.includes('trycloudflare.com')
+  ) {
     return {
       activeUrl: productionDomain.replace(/\/$/, ''),
       mode: 'CUSTOM',
@@ -49,11 +80,11 @@ export function getHostConfig(): HostConfig {
     };
   }
 
-  // 2. Active saved configuration from admin monitor
+  // 4. Active saved configuration from admin monitor (only if not an expired tunnel)
   if (fs.existsSync(CONFIG_PATH)) {
     try {
       const data = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-      if (data.activeUrl) {
+      if (data.activeUrl && !data.activeUrl.includes('trycloudflare.com')) {
         return {
           activeUrl: data.activeUrl.replace(/\/$/, ''),
           mode: data.mode || 'LOCAL_WIFI',
@@ -65,10 +96,13 @@ export function getHostConfig(): HostConfig {
     } catch {}
   }
 
-  // 3. Fallback: Local network development
+  // 5. Fallback: Local network development
   const envUrl = process.env.NEXT_PUBLIC_APP_URL;
   return {
-    activeUrl: envUrl || `http://${lanIp}:${defaultPort}`,
+    activeUrl:
+      envUrl && !envUrl.includes('trycloudflare.com')
+        ? envUrl
+        : `http://${lanIp}:${defaultPort}`,
     mode: 'LOCAL_WIFI',
     lanIp,
     port: defaultPort,
@@ -101,7 +135,7 @@ export function saveHostConfig(url: string, mode: HostConfig['mode']): HostConfi
 /**
  * Returns the effective base URL for QR codes and guest links
  */
-export function getActiveGuestBaseUrl(): string {
-  const cfg = getHostConfig();
+export function getActiveGuestBaseUrl(req?: NextRequest): string {
+  const cfg = getHostConfig(req);
   return cfg.activeUrl;
 }

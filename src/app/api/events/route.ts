@@ -17,12 +17,26 @@ export async function GET(req: NextRequest) {
       },
     });
 
-    // Format BigInt usedStorageBytes safely to number/string
-    const formatted = events.map((e) => ({
-      ...e,
-      usedStorageBytes: Number(e.usedStorageBytes),
-      photoCount: e._count.photos,
-    }));
+    const appUrl = getActiveGuestBaseUrl(req);
+
+    // Format BigInt usedStorageBytes safely and ensure QR codes point to live host
+    const formatted = await Promise.all(
+      events.map(async (e) => {
+        let qr = e.qrCodeDataUrl;
+        if (!qr || qr.includes('trycloudflare.com') || appUrl.startsWith('https://')) {
+          try {
+            const liveUrl = `${appUrl}/event/${e.slug}`;
+            qr = await QRCodeService.generateDataUrl(liveUrl, { width: 400 });
+          } catch {}
+        }
+        return {
+          ...e,
+          usedStorageBytes: Number(e.usedStorageBytes),
+          photoCount: e._count.photos,
+          qrCodeDataUrl: qr,
+        };
+      })
+    );
 
     return NextResponse.json(formatted);
   } catch (err: any) {
@@ -71,7 +85,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Generate QR Code Data URL pointing to event guest gallery using active public or LAN host
-    const appUrl = getActiveGuestBaseUrl();
+    const appUrl = getActiveGuestBaseUrl(req);
     const eventUrl = `${appUrl}/event/${slug}`;
     const qrCodeDataUrl = await QRCodeService.generateDataUrl(eventUrl, {
       width: 400,
