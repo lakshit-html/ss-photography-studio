@@ -3,6 +3,8 @@ import prisma from '@/lib/prisma';
 import { requireAdminFromRequest } from '@/lib/auth';
 import { StorageService } from '@/lib/storage';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(req: NextRequest) {
   try {
     const admin = await requireAdminFromRequest(req);

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { FaceRecognitionService } from '@/lib/face-recognition';
 
+export const dynamic = 'force-dynamic';
+
 export const maxDuration = 30; // 30s max duration
 
 export async function POST(req: NextRequest) {

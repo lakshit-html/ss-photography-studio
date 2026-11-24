@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { requireAdminFromRequest } from '@/lib/auth';
 import { QRCodeService } from '@/lib/qr';
+
+export const dynamic = 'force-dynamic';
 import { getActiveGuestBaseUrl } from '@/lib/tunnel';
 
 export async function GET(req: NextRequest) {

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { requireAdminFromRequest } from '@/lib/auth';
+
+export const dynamic = 'force-dynamic';
 import { StorageService } from '@/lib/storage';
 
 export async function GET() {

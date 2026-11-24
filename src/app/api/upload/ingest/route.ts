@@ -5,6 +5,7 @@ import { StorageService, computeSHA256 } from '@/lib/storage';
 import { ImageProcessor } from '@/lib/watermark';
 import { FaceRecognitionService } from '@/lib/face-recognition';
 
+export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow 60s for high-res photo processing
 
 export async function POST(req: NextRequest) {
