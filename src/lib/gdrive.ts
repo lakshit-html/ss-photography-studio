@@ -35,10 +35,18 @@ export interface GDriveUploadResult {
 }
 
 export class GoogleDriveAdapter {
-  private static clientId = process.env.GDRIVE_CLIENT_ID || '';
-  private static clientSecret = process.env.GDRIVE_CLIENT_SECRET || '';
-  private static refreshToken = process.env.GDRIVE_REFRESH_TOKEN || '';
-  private static rootFolderId = process.env.GDRIVE_ROOT_FOLDER_ID || '';
+  public static get clientId(): string {
+    return process.env.GDRIVE_CLIENT_ID || '';
+  }
+  public static get clientSecret(): string {
+    return process.env.GDRIVE_CLIENT_SECRET || '';
+  }
+  public static get refreshToken(): string {
+    return process.env.GDRIVE_REFRESH_TOKEN || '';
+  }
+  public static get rootFolderId(): string {
+    return process.env.GDRIVE_ROOT_FOLDER_ID || '';
+  }
 
   // In-memory token cache
   private static cachedAccessToken: string | null = null;
@@ -74,7 +82,7 @@ export class GoogleDriveAdapter {
 
     if (!this.clientId || !this.clientSecret || !this.refreshToken) {
       throw new Error(
-        'Google Drive OAuth2 credentials missing. Please set GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, and GDRIVE_REFRESH_TOKEN in .env'
+        'Google Drive OAuth2 credentials missing. Please set GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, and GDRIVE_REFRESH_TOKEN in environment variables.'
       );
     }
 
