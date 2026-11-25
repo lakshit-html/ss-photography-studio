@@ -1,10 +1,10 @@
 /**
  * SS PHOTOGRAPHY — WINDOWS AUTO-START INSTALLER
  *
- * Installs a Windows Startup shortcut so that:
- * 1. Nikon D750 Camera Uploader automatically starts when laptop boots up
- * 2. Runs silently in the background without popping up annoying command prompts
- * 3. Monitors tether_inbox continuously for new captures & deletions
+ * Configures Windows so that whenever the PC starts / logs in:
+ * 1. Any legacy conflicting local-server startup shortcut (SS-Photography-Live.lnk) is removed.
+ * 2. Nikon D750 Camera Uploader automatically starts silently in the background.
+ * 3. Continuously monitors tether_inbox and syncs uploads & deletions straight to the live website.
  */
 
 const fs = require('fs');
@@ -23,11 +23,23 @@ const startupDir = path.join(
 const projectDir = path.resolve(__dirname, '..');
 const vbsTarget = path.join(__dirname, 'run-uploader-background.vbs');
 const shortcutPath = path.join(startupDir, 'SS-Photography-Camera-Uploader.lnk');
+const legacyShortcutPath = path.join(startupDir, 'SS-Photography-Live.lnk');
 
 if (!fs.existsSync(startupDir)) {
   fs.mkdirSync(startupDir, { recursive: true });
 }
 
+// 1. Remove conflicting legacy localhost launcher if present
+if (fs.existsSync(legacyShortcutPath)) {
+  try {
+    fs.unlinkSync(legacyShortcutPath);
+    console.log(`[CLEANUP] Removed conflicting legacy shortcut: ${legacyShortcutPath}`);
+  } catch (err) {
+    console.warn(`[WARN] Could not remove legacy shortcut: ${err.message}`);
+  }
+}
+
+// 2. Create clean Startup folder shortcut (.lnk)
 const psScript = `
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut('${shortcutPath.replace(/'/g, "''")}')
@@ -42,14 +54,19 @@ try {
   const encoded = Buffer.from(psScript, 'utf16le').toString('base64');
   execSync(`powershell -NoProfile -EncodedCommand ${encoded}`, { stdio: 'inherit' });
 
+  // 3. Also ensure HKCU Run key points directly to silent VBS launcher for rock-solid PC boot startup
+  const regCmd = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "SSPhotographyCameraUploader" /t REG_SZ /d "wscript.exe \\"${vbsTarget}\\"" /f`;
+  execSync(regCmd, { stdio: 'pipe' });
+
   console.log('=================================================================');
   console.log('  SS PHOTOGRAPHY — CAMERA UPLOADER AUTO-START INSTALLED!');
   console.log('=================================================================');
-  console.log(`[INSTALLED] Shortcut created: ${shortcutPath}`);
-  console.log('[BEHAVIOR]  Whenever laptop boots on, uploader starts automatically.');
-  console.log('[MONITOR]   Watches tether_inbox for live uploads and auto-deletes.');
+  console.log(`[STARTUP LNK] ${shortcutPath}`);
+  console.log(`[REGISTRY RUN] HKCU\\...\\Run\\SSPhotographyCameraUploader`);
+  console.log('[BEHAVIOR]    Whenever PC turns on, uploader starts silently in background.');
+  console.log('[SYNC TARGET] Live Cloud Website (https://ss-photography-studio.vercel.app)');
   console.log('=================================================================\n');
 } catch (err) {
-  console.error('[ERROR] Could not create startup shortcut:', err.message);
+  console.error('[ERROR] Could not configure Windows auto-start:', err.message);
   process.exit(1);
 }

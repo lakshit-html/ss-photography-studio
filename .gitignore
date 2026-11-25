@@ -35,6 +35,8 @@
 /bin/cloudflared.exe
 *.exe
 LIVE_URL.txt
+uploader/uploader.pid
+uploader/uploaded-hashes.json
 
 # OS Files
 .DS_Store

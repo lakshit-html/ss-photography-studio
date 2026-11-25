@@ -78,6 +78,44 @@ export default function AdminPhotosPage() {
     }
   }, [selectedEventId]);
 
+  const computeFileSha256 = async (file: File): Promise<string> => {
+    const buf = await file.arrayBuffer();
+    const hashBuf = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hashBuf))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  };
+
+  const createWebOptimizedImage = async (
+    file: File,
+    maxEdge = 2048,
+    quality = 0.88
+  ): Promise<{ blob: Blob; width: number; height: number }> => {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const origW = bitmap.width;
+    const origH = bitmap.height;
+    const scale = Math.min(1, maxEdge / Math.max(origW, origH));
+    const targetW = Math.max(1, Math.round(origW * scale));
+    const targetH = Math.max(1, Math.round(origH * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Canvas 2D unavailable');
+    ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+    bitmap.close();
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error('Image compression failed'))),
+        'image/jpeg',
+        quality
+      );
+    });
+    return { blob, width: origW, height: origH };
+  };
+
   const processUploadFiles = async (fileList: FileList | File[]) => {
     const files = Array.from(fileList).filter((f) =>
       f.type.startsWith('image/') || /\.(jpg|jpeg|png|webp|heic)$/i.test(f.name)
@@ -110,6 +148,7 @@ export default function AdminPhotosPage() {
     let duplicateCount = 0;
     let errorCount = 0;
     let lastErrorMsg = '';
+    const DIRECT_THRESHOLD_BYTES = 3.2 * 1024 * 1024;
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -123,12 +162,67 @@ export default function AdminPhotosPage() {
       });
 
       const formData = new FormData();
-      formData.append('file', file);
       formData.append('eventId', targetEventId);
       formData.append('source', 'MANUAL_BATCH');
       formData.append('sourceDevice', 'Web Batch Uploader');
 
       try {
+        if (file.size > DIRECT_THRESHOLD_BYTES) {
+          const sha256 = await computeFileSha256(file);
+          const sessionRes = await fetch('/api/upload/gdrive-session', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-camera-ingest-key': 'ss_cam_ingest_key_wedding_2026',
+            },
+            body: JSON.stringify({
+              eventId: targetEventId,
+              filename: file.name,
+              mimeType: file.type || 'image/jpeg',
+              fileSize: file.size,
+              sha256,
+            }),
+          });
+
+          const sessionData = await sessionRes.json().catch(() => ({}));
+          if (sessionRes.ok && sessionData.duplicate) {
+            duplicateCount++;
+            continue;
+          }
+
+          let originalDriveFileId = '';
+          let originalSafeFilename = '';
+
+          if (sessionRes.ok && sessionData.gdriveConfigured && sessionData.uploadUrl) {
+            const putRes = await fetch(sessionData.uploadUrl, {
+              method: 'PUT',
+              headers: { 'Content-Type': file.type || 'image/jpeg' },
+              body: file,
+            });
+            if (putRes.ok) {
+              const driveFile = await putRes.json().catch(() => ({}));
+              if (driveFile.id) {
+                originalDriveFileId = driveFile.id;
+                originalSafeFilename = sessionData.safeFilename || file.name;
+              }
+            }
+          }
+
+          const webImg = await createWebOptimizedImage(file);
+          formData.append('file', webImg.blob, file.name);
+          formData.append('originalSha256', sha256);
+          formData.append('originalFilename', file.name);
+          formData.append('originalFileSize', String(file.size));
+          formData.append('originalWidth', String(webImg.width));
+          formData.append('originalHeight', String(webImg.height));
+          if (originalDriveFileId) {
+            formData.append('originalDriveFileId', originalDriveFileId);
+            formData.append('originalSafeFilename', originalSafeFilename);
+          }
+        } else {
+          formData.append('file', file);
+        }
+
         const res = await fetch('/api/upload/ingest', {
           method: 'POST',
           headers: {
@@ -278,11 +372,10 @@ export default function AdminPhotosPage() {
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${
-          isDragging
-            ? 'border-brand-400 bg-brand-500/10 scale-[1.01]'
-            : 'border-[#262626] hover:border-brand-500/50 bg-[#111111]/60'
-        }`}
+        className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all ${isDragging
+          ? 'border-brand-400 bg-brand-500/10 scale-[1.01]'
+          : 'border-[#262626] hover:border-brand-500/50 bg-[#111111]/60'
+          }`}
       >
         <div className="max-w-md mx-auto flex flex-col items-center justify-center space-y-3">
           <div className="w-12 h-12 rounded-full bg-brand-500/10 flex items-center justify-center text-brand-400 border border-brand-500/20">
@@ -329,13 +422,12 @@ export default function AdminPhotosPage() {
       {/* Upload Status Alert */}
       {uploadStatus && (
         <div
-          className={`p-4 rounded-xl text-xs flex items-center justify-between ${
-            uploadStatus.type === 'success'
-              ? 'bg-emerald-950/40 border border-emerald-500/40 text-emerald-300'
-              : uploadStatus.type === 'error'
+          className={`p-4 rounded-xl text-xs flex items-center justify-between ${uploadStatus.type === 'success'
+            ? 'bg-emerald-950/40 border border-emerald-500/40 text-emerald-300'
+            : uploadStatus.type === 'error'
               ? 'bg-rose-950/40 border border-rose-500/40 text-rose-300'
               : 'bg-brand-500/10 border border-brand-500/30 text-brand-300'
-          }`}
+            }`}
         >
           <div className="flex items-center space-x-2">
             {uploadStatus.type === 'success' ? (

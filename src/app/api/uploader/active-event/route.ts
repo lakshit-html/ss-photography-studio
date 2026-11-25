@@ -12,7 +12,20 @@ export async function GET() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
       const data = JSON.parse(await fs.promises.readFile(CONFIG_PATH, 'utf8'));
-      return NextResponse.json(data);
+      const candidateId = data.eventId || data.activeEventId || '';
+      if (candidateId) {
+        const matched = await prisma.event.findFirst({
+          where: { OR: [{ id: candidateId }, { slug: candidateId }] },
+        });
+        if (matched) {
+          return NextResponse.json({
+            eventId: matched.id,
+            activeEventId: matched.id,
+            eventTitle: matched.title,
+            slug: matched.slug,
+          });
+        }
+      }
     }
 
     // Default to latest active event
@@ -23,6 +36,7 @@ export async function GET() {
 
     return NextResponse.json({
       eventId: latest?.id || '',
+      activeEventId: latest?.id || '',
       eventTitle: latest?.title || 'No Active Event',
       slug: latest?.slug || '',
     });

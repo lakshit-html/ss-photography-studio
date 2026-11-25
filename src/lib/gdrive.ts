@@ -273,6 +273,76 @@ export class GoogleDriveAdapter {
   }
 
   /**
+   * Initiates a single-file Google Drive Resumable Upload Session.
+   * Returns a single-use uploadUrl without exposing OAuth access tokens to clients.
+   */
+  public static async createResumableUploadSession(
+    filename: string,
+    parentFolderId: string,
+    mimeType = 'image/jpeg',
+    fileSize?: number,
+    origin?: string
+  ): Promise<{ uploadUrl: string; safeFilename: string }> {
+    const token = await this.getAccessToken();
+    const safeFilename = `${Date.now()}_${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=UTF-8',
+      'X-Upload-Content-Type': mimeType,
+    };
+    if (fileSize && fileSize > 0) {
+      headers['X-Upload-Content-Length'] = String(fileSize);
+    }
+    if (origin) {
+      headers['Origin'] = origin;
+    }
+
+    const initUrl =
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,size,mimeType,parents';
+
+    const response = await fetch(initUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: safeFilename,
+        parents: [parentFolderId],
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`Google Drive resumable init failed for "${filename}": ${response.status} ${err}`);
+    }
+
+    const uploadUrl = response.headers.get('location');
+    if (!uploadUrl) {
+      throw new Error('Google Drive did not return a resumable upload Location header');
+    }
+
+    return { uploadUrl, safeFilename };
+  }
+
+  /**
+   * Securely streams a file directly from Google Drive without buffering large payloads in RAM
+   */
+  public static async streamFile(fileId: string): Promise<Response> {
+    const token = await this.getAccessToken();
+    const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+
+    const response = await fetch(downloadUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok || !response.body) {
+      const err = await response.text().catch(() => '');
+      throw new Error(`Failed to stream file from Google Drive (${fileId}): ${response.status} ${err}`);
+    }
+
+    return response;
+  }
+
+  /**
    * Securely streams / retrieves a file buffer from Google Drive by File ID
    */
   public static async downloadFile(fileId: string): Promise<Buffer> {

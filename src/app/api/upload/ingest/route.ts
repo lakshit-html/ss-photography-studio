@@ -4,6 +4,7 @@ import { requireAdminFromRequest } from '@/lib/auth';
 import { StorageService, computeSHA256 } from '@/lib/storage';
 import { ImageProcessor } from '@/lib/watermark';
 import { FaceRecognitionService } from '@/lib/face-recognition';
+import { resolveTargetEvent } from '@/lib/event-resolver';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60; // Allow 60s for high-res photo processing
@@ -22,54 +23,32 @@ export async function POST(req: NextRequest) {
 
     const formData = await req.formData();
     const file = formData.get('file') as File | null;
-    let eventId = formData.get('eventId') as string | null;
+    const rawEventId = formData.get('eventId') as string | null;
     const source = (formData.get('source') as string) || (ingestKeyHeader ? 'CAMERA_TETHER' : 'MANUAL');
     const sourceDevice = (formData.get('sourceDevice') as string) || 'Nikon D750';
+
+    // Optional metadata for direct-to-Google-Drive high-res original uploads (> 3.5 MB)
+    const originalDriveFileId = (formData.get('originalDriveFileId') as string) || '';
+    const originalSafeFilename = (formData.get('originalSafeFilename') as string) || '';
+    const originalSha256 = (formData.get('originalSha256') as string) || '';
+    const originalFilenameOverride = (formData.get('originalFilename') as string) || '';
+    const originalFileSizeRaw = Number(formData.get('originalFileSize') || 0);
+    const originalWidthRaw = Number(formData.get('originalWidth') || 0);
+    const originalHeightRaw = Number(formData.get('originalHeight') || 0);
 
     if (!file) {
       return NextResponse.json({ error: 'No image file provided' }, { status: 400 });
     }
 
-    // 1. Resolve target event with bulletproof fallback
-    let event = eventId
-      ? await prisma.event.findFirst({
-          where: {
-            OR: [{ id: eventId }, { slug: eventId }],
-          },
-        })
-      : null;
-
-    if (!event) {
-      event = await prisma.event.findFirst({
-        where: { status: 'ACTIVE' },
-        orderBy: { eventDate: 'desc' },
-      });
-    }
-
-    if (!event) {
-      event = await prisma.event.findFirst({
-        orderBy: { eventDate: 'desc' },
-      });
-    }
-
-    if (!event) {
-      event = await prisma.event.create({
-        data: {
-          title: 'Wedding Celebration',
-          slug: 'reception',
-          eventDate: new Date(),
-          status: 'ACTIVE',
-        },
-      });
-    }
-
-    eventId = event.id;
+    // 1. Resolve target event
+    const event = await resolveTargetEvent(rawEventId);
+    const eventId = event.id;
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
-    const originalFilename = file.name || `DSC_${Date.now()}.jpg`;
+    const originalFilename = originalFilenameOverride || file.name || `DSC_${Date.now()}.jpg`;
 
-    // 2. Duplicate Detection via SHA-256
-    const sha256 = computeSHA256(fileBuffer);
+    // 2. Duplicate Detection via SHA-256 (prefers true original SHA-256 when provided)
+    const sha256 = originalSha256 || computeSHA256(fileBuffer);
     const existingPhoto = await prisma.photo.findFirst({
       where: { eventId, sha256 },
     });
@@ -79,7 +58,7 @@ export async function POST(req: NextRequest) {
         data: {
           eventId,
           filename: originalFilename,
-          fileSize: fileBuffer.length,
+          fileSize: originalFileSizeRaw || fileBuffer.length,
           status: 'DUPLICATE',
           errorMessage: 'Skipped: Identical photo already exists in this event',
           sourceDevice,
@@ -91,6 +70,11 @@ export async function POST(req: NextRequest) {
           message: 'Photo already exists (duplicate skipped)',
           photoId: existingPhoto.id,
           duplicate: true,
+          photo: {
+            id: existingPhoto.id,
+            filename: existingPhoto.filename,
+            faceCount: existingPhoto.faceCount,
+          },
         },
         { status: 200 }
       );
@@ -101,19 +85,27 @@ export async function POST(req: NextRequest) {
       where: { id: 'default' },
     });
 
-    // 4. Generate Images: Original, Watermarked Preview, Thumbnail
-    const [originalSaved, meta] = await Promise.all([
-      StorageService.saveFile(eventId, 'originals', originalFilename, fileBuffer),
-      ImageProcessor.getMetadata(fileBuffer),
+    // 4. Generate Images: Original (or reference pre-uploaded Drive original), Watermarked Preview, Thumbnail
+    const meta = await ImageProcessor.getMetadata(fileBuffer);
+    let originalUrl = '';
+
+    if (originalDriveFileId) {
+      const safeOriginalName =
+        originalSafeFilename || `${Date.now()}_${originalFilename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      originalUrl = `/api/photos/gdrive/${encodeURIComponent(originalDriveFileId)}?event=${eventId}&cat=originals&file=${encodeURIComponent(safeOriginalName)}`;
+    } else {
+      const originalSaved = await StorageService.saveFile(eventId, 'originals', originalFilename, fileBuffer);
+      originalUrl = originalSaved.url;
+    }
+
+    const [watermarkedBuffer, thumbnailBuffer] = await Promise.all([
+      ImageProcessor.generateWatermarkedPreview(fileBuffer, {
+        opacity: watermarkSettings?.opacity || 0.7,
+        sizePercentage: watermarkSettings?.sizePercentage || 15,
+        position: (watermarkSettings?.position as any) || 'BOTTOM_RIGHT',
+      }),
+      ImageProcessor.generateThumbnail(fileBuffer, 600),
     ]);
-
-    const watermarkedBuffer = await ImageProcessor.generateWatermarkedPreview(fileBuffer, {
-      opacity: watermarkSettings?.opacity || 0.7,
-      sizePercentage: watermarkSettings?.sizePercentage || 15,
-      position: (watermarkSettings?.position as any) || 'BOTTOM_RIGHT',
-    });
-
-    const thumbnailBuffer = await ImageProcessor.generateThumbnail(fileBuffer, 600);
 
     const [previewSaved, thumbSaved] = await Promise.all([
       StorageService.saveFile(eventId, 'previews', originalFilename, watermarkedBuffer),
@@ -123,17 +115,21 @@ export async function POST(req: NextRequest) {
     // 5. Detect Faces & Extract 128D Embeddings
     const detectedFaces = await FaceRecognitionService.detectFaces(fileBuffer);
 
+    const trueFileSize = originalFileSizeRaw > 0 ? originalFileSizeRaw : fileBuffer.length;
+    const trueWidth = originalWidthRaw > 0 ? originalWidthRaw : meta.width;
+    const trueHeight = originalHeightRaw > 0 ? originalHeightRaw : meta.height;
+
     // 6. Save Photo in Database
     const photo = await prisma.photo.create({
       data: {
         eventId,
         filename: originalFilename,
-        originalUrl: originalSaved.url,
+        originalUrl,
         previewUrl: previewSaved.url,
         thumbnailUrl: thumbSaved.url,
-        fileSize: fileBuffer.length,
-        width: meta.width,
-        height: meta.height,
+        fileSize: trueFileSize,
+        width: trueWidth,
+        height: trueHeight,
         format: meta.format,
         sha256,
         source,
@@ -156,7 +152,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 8. Update Event storage bytes
-    const totalAddedBytes = fileBuffer.length + watermarkedBuffer.length + thumbnailBuffer.length;
+    const totalAddedBytes = trueFileSize + watermarkedBuffer.length + thumbnailBuffer.length;
     await prisma.event.update({
       where: { id: eventId },
       data: {
@@ -171,7 +167,7 @@ export async function POST(req: NextRequest) {
       data: {
         eventId,
         filename: originalFilename,
-        fileSize: fileBuffer.length,
+        fileSize: trueFileSize,
         status: 'SUCCESS',
         sourceDevice,
       },

@@ -72,17 +72,22 @@ export async function GET(
       }
     }
 
-    // 3. Cloud Retrieval: Securely stream directly from Google Drive API
+    // 3. Cloud Retrieval: Securely stream directly from Google Drive API (supports > 4.5 MB originals cleanly)
     if (GoogleDriveAdapter.isConfigured()) {
       try {
-        const driveBuffer = await GoogleDriveAdapter.downloadFile(fileId);
-        return new NextResponse(new Uint8Array(driveBuffer), {
+        const driveResponse = await GoogleDriveAdapter.streamFile(fileId);
+        const headers: Record<string, string> = {
+          'Content-Type': driveResponse.headers.get('content-type') || 'image/jpeg',
+          'Cache-Control': 'public, max-age=31536000, stale-while-revalidate=86400',
+          'Content-Disposition':
+            category === 'originals' ? `attachment; filename="${filename || fileId + '.jpg'}"` : 'inline',
+        };
+        const contentLen = driveResponse.headers.get('content-length');
+        if (contentLen) headers['Content-Length'] = contentLen;
+
+        return new NextResponse(driveResponse.body, {
           status: 200,
-          headers: {
-            'Content-Type': 'image/jpeg',
-            'Cache-Control': 'public, max-age=31536000, stale-while-revalidate=86400',
-            'Content-Disposition': category === 'originals' ? `attachment; filename="${filename || fileId + '.jpg'}"` : 'inline',
-          },
+          headers,
         });
       } catch (gdriveErr: any) {
         console.error(`[Google Drive Stream Error] for fileId ${fileId}:`, gdriveErr.message);
