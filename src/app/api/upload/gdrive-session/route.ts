@@ -21,7 +21,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { eventId: rawEventId, filename, mimeType, fileSize, sha256 } = body;
+    const { eventId: rawEventId, filename, mimeType, fileSize, sha256, skipDuplicateCheck } = body;
 
     if (!filename) {
       return NextResponse.json({ error: 'Filename is required' }, { status: 400 });
@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     const event = await resolveTargetEvent(rawEventId);
 
     // Early SHA-256 duplicate check before uploading multi-megabyte original to Drive
-    if (sha256) {
+    if (sha256 && !skipDuplicateCheck) {
       const existing = await prisma.photo.findFirst({
         where: { eventId: event.id, sha256 },
         select: { id: true, filename: true, faceCount: true },
@@ -81,3 +81,4 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+

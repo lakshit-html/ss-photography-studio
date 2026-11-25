@@ -37,6 +37,7 @@
 LIVE_URL.txt
 uploader/uploader.pid
 uploader/uploaded-hashes.json
+uploader/master-queue.json
 
 # OS Files
 .DS_Store

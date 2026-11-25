@@ -163,3 +163,44 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ error: 'Failed to delete photo' }, { status: 500 });
   }
 }
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const admin = await requireAdminFromRequest(req);
+    const ingestKeyHeader = req.headers.get('x-camera-ingest-key');
+    const validIngestKey = process.env.CAMERA_INGEST_API_KEY || 'ss_cam_ingest_key_wedding_2026';
+
+    if (!admin && ingestKeyHeader !== validIngestKey) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const { id, originalDriveFileId, originalSafeFilename } = await req.json();
+    if (!id || !originalDriveFileId) {
+      return NextResponse.json({ error: 'Photo id and originalDriveFileId are required' }, { status: 400 });
+    }
+
+    const photo = await prisma.photo.findUnique({ where: { id } });
+    if (!photo) {
+      return NextResponse.json({ error: 'Photo not found' }, { status: 404 });
+    }
+
+    // Remove temporary smaller original from Drive if different
+    if (photo.originalUrl && !photo.originalUrl.includes(originalDriveFileId)) {
+      await StorageService.deleteFile(photo.originalUrl).catch(() => {});
+    }
+
+    const safeName =
+      originalSafeFilename || `${Date.now()}_${photo.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const newOriginalUrl = `/api/photos/gdrive/${encodeURIComponent(originalDriveFileId)}?event=${photo.eventId}&cat=originals&file=${encodeURIComponent(safeName)}`;
+
+    await prisma.photo.update({
+      where: { id: photo.id },
+      data: { originalUrl: newOriginalUrl },
+    });
+
+    return NextResponse.json({ success: true, photoId: photo.id, originalUrl: newOriginalUrl });
+  } catch (err: any) {
+    console.error('Patch photo original error:', err);
+    return NextResponse.json({ error: 'Failed to upgrade original photo' }, { status: 500 });
+  }
+}

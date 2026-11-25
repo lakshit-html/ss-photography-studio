@@ -1,14 +1,14 @@
 /**
  * SS PHOTOGRAPHY — NIKON D750 TETHERED FOLDER WATCHER & AUTO-UPLOADER (ESM)
  *
- * Production Features:
- * - Always syncs directly with Live Cloud Website (https://ss-photography-studio.vercel.app)
- * - Bypasses 4.5 MB Cloud Limit: Uploads 100% Full-Res Nikon Originals direct to Google Drive Resumable API,
- *   while sending crisp 2048px web images to Cloud AI for instant YuNet+SFace face recognition & previews
- * - Persistent Disk Queue + Hash Memory (survives PC reboots without duplicate re-uploads)
- * - Auto-Delete Sync + Startup/Periodic Folder Reconciliation
- * - Single-Instance Lock (prevents duplicate competing uploader processes)
- * - IPv4-first DNS + Resilient Retry Logic for unstable venue Wi-Fi
+ * Architecture:
+ * - Instant Live Publish (~4s per DSLR photo): Sends crisp 2048px HD JPEG (< 1 MB) first
+ *   so photos + AI Face Scan appear on the live website within seconds.
+ * - Background Master Sync: Uploads full untouched 6048x4024 Nikon Originals (9-25 MB+)
+ *   directly to Google Drive in resilient 2 MB resumable chunks (never hits Vercel 4.5 MB cap
+ *   or venue Wi-Fi timeouts), then seamlessly upgrades the photo's originalUrl via PATCH /api/photos.
+ * - Auto-Delete Sync + Startup & Periodic Reconciliation.
+ * - Single-Instance PID Lock + IPv4-first DNS + Persistent Disk Queues.
  */
 
 import fs from 'fs';
@@ -18,15 +18,29 @@ import dns from 'dns';
 import chokidar from 'chokidar';
 import sharp from 'sharp';
 
-// Prevent Node/Undici IPv6 connect timeouts on dual-stack Windows Wi-Fi
 dns.setDefaultResultOrder('ipv4first');
 
 const QUEUE_FILE = path.resolve(process.cwd(), 'uploader/uploader-queue.json');
+const MASTER_QUEUE_FILE = path.resolve(process.cwd(), 'uploader/master-queue.json');
 const HASHES_FILE = path.resolve(process.cwd(), 'uploader/uploaded-hashes.json');
 const CONFIG_FILE = path.resolve(process.cwd(), 'uploader/active-event.json');
 const PID_FILE = path.resolve(process.cwd(), 'uploader/uploader.pid');
+const LOG_FILE = path.resolve(process.cwd(), 'uploader/uploader-service.log');
 const DEFAULT_LIVE_URL = 'https://ss-photography-studio.vercel.app';
-const DIRECT_UPLOAD_THRESHOLD_BYTES = 3.2 * 1024 * 1024; // 3.2 MB (safe margin below Vercel 4.5 MB cap)
+const DIRECT_UPLOAD_THRESHOLD_BYTES = 3.2 * 1024 * 1024;
+const DRIVE_CHUNK_SIZE = 2 * 1024 * 1024; // Exact multiple of 256 KiB required by Google Drive
+
+function appendLogFile(line) {
+  try {
+    if (fs.existsSync(LOG_FILE)) {
+      const st = fs.statSync(LOG_FILE);
+      if (st.size > 2 * 1024 * 1024) {
+        fs.writeFileSync(LOG_FILE, '', 'utf8');
+      }
+    }
+    fs.appendFileSync(LOG_FILE, line + '\n', 'utf8');
+  } catch {}
+}
 
 function acquireSingleInstanceLock() {
   try {
@@ -37,8 +51,8 @@ function acquireSingleInstanceLock() {
       const oldPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
       if (oldPid && oldPid !== process.pid) {
         try {
-          process.kill(oldPid, 0); // Throws ESRCH if dead
-          console.log(`[INSTANCE] Replacing existing background uploader (PID ${oldPid})...`);
+          process.kill(oldPid, 0);
+          console.log(`[INSTANCE] Replacing older uploader process (PID ${oldPid})...`);
           process.kill(oldPid, 'SIGTERM');
           const waitUntil = Date.now() + 800;
           while (Date.now() < waitUntil) {
@@ -48,9 +62,7 @@ function acquireSingleInstanceLock() {
               break;
             }
           }
-        } catch {
-          // Old PID is already dead; safe to overwrite
-        }
+        } catch {}
       }
     }
 
@@ -61,7 +73,7 @@ function acquireSingleInstanceLock() {
         if (fs.existsSync(PID_FILE) && fs.readFileSync(PID_FILE, 'utf8').trim() === String(process.pid)) {
           fs.unlinkSync(PID_FILE);
         }
-      } catch { }
+      } catch {}
     };
     process.on('exit', cleanupPid);
     process.on('SIGINT', () => {
@@ -94,6 +106,48 @@ async function robustFetch(url, options = {}, retries = 3, timeoutMs = 45000) {
     }
   }
   throw lastErr;
+}
+
+async function uploadBufferInChunksToDrive(uploadUrl, fileBuffer) {
+  const totalSize = fileBuffer.length;
+  let offset = 0;
+
+  while (offset < totalSize) {
+    const end = Math.min(offset + DRIVE_CHUNK_SIZE, totalSize);
+    const chunk = fileBuffer.subarray(offset, end);
+    const contentRange = `bytes ${offset}-${end - 1}/${totalSize}`;
+
+    const res = await robustFetch(
+      uploadUrl,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': String(chunk.length),
+          'Content-Range': contentRange,
+        },
+        body: chunk,
+      },
+      3,
+      60000
+    );
+
+    if (res.status === 308) {
+      // Chunk accepted; Google Drive indicates next byte via Range header if needed
+      offset = end;
+      continue;
+    }
+
+    if (res.ok) {
+      const data = await res.json();
+      return data; // Completed on final chunk
+    }
+
+    const errText = await res.text().catch(() => '');
+    throw new Error(`Drive chunk failed (${contentRange}): HTTP ${res.status} ${errText}`);
+  }
+
+  throw new Error('Drive resumable upload finished loop without Drive file metadata');
 }
 
 function collectFilesRecursive(dir, maxDepth = 2, currentDepth = 0, out = []) {
@@ -132,7 +186,7 @@ function parseArgs() {
     try {
       const activeCfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
       eventId = activeCfg.eventId || activeCfg.activeEventId || '';
-    } catch { }
+    } catch {}
   }
 
   return { watchFolder, eventId, serverUrl, apiKey };
@@ -142,8 +196,10 @@ class NikonCameraUploader {
   constructor(config) {
     this.config = config;
     this.queue = [];
-    this.uploadedHashes = new Map(); // sha256 -> filename
+    this.masterQueue = [];
+    this.uploadedHashes = new Map();
     this.isProcessing = false;
+    this.isProcessingMasters = false;
     this.recentLogs = [];
     this.activeEventTitle = '';
     this.stats = {
@@ -156,6 +212,7 @@ class NikonCameraUploader {
     };
 
     this.loadQueueFromDisk();
+    this.loadMasterQueueFromDisk();
     this.loadHashesFromDisk();
   }
 
@@ -163,6 +220,7 @@ class NikonCameraUploader {
     const time = new Date().toLocaleTimeString();
     const formatted = `[${time}] ${msg}`;
     console.log(formatted);
+    appendLogFile(formatted);
     this.recentLogs.push(formatted);
     if (this.recentLogs.length > 20) this.recentLogs.shift();
   }
@@ -170,17 +228,12 @@ class NikonCameraUploader {
   loadQueueFromDisk() {
     try {
       if (fs.existsSync(QUEUE_FILE)) {
-        const raw = fs.readFileSync(QUEUE_FILE, 'utf8');
-        const savedQueue = JSON.parse(raw);
-        if (Array.isArray(savedQueue)) {
-          this.queue = savedQueue.filter((item) => item.status === 'PENDING' || item.status === 'RETRY');
-          if (this.queue.length > 0) {
-            this.log(`[RECOVERY] Recovered ${this.queue.length} pending photo(s) from local queue.`);
-          }
+        const saved = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
+        if (Array.isArray(saved)) {
+          this.queue = saved.filter((item) => item.status === 'PENDING' || item.status === 'RETRY');
         }
       }
-    } catch (err) {
-      console.warn('[WARN] Could not parse queue file, starting fresh:', err.message);
+    } catch {
       this.queue = [];
     }
   }
@@ -190,9 +243,24 @@ class NikonCameraUploader {
       const dir = path.dirname(QUEUE_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(QUEUE_FILE, JSON.stringify(this.queue, null, 2), 'utf8');
-    } catch (err) {
-      console.error('[ERROR] Failed to save queue to disk:', err.message);
+    } catch {}
+  }
+
+  loadMasterQueueFromDisk() {
+    try {
+      if (fs.existsSync(MASTER_QUEUE_FILE)) {
+        const saved = JSON.parse(fs.readFileSync(MASTER_QUEUE_FILE, 'utf8'));
+        if (Array.isArray(saved)) this.masterQueue = saved;
+      }
+    } catch {
+      this.masterQueue = [];
     }
+  }
+
+  saveMasterQueueToDisk() {
+    try {
+      fs.writeFileSync(MASTER_QUEUE_FILE, JSON.stringify(this.masterQueue, null, 2), 'utf8');
+    } catch {}
   }
 
   loadHashesFromDisk() {
@@ -205,14 +273,14 @@ class NikonCameraUploader {
           }
         }
       }
-    } catch { }
+    } catch {}
   }
 
   saveHashesToDisk() {
     try {
       const obj = Object.fromEntries(Array.from(this.uploadedHashes.entries()).slice(-5000));
       fs.writeFileSync(HASHES_FILE, JSON.stringify(obj, null, 2), 'utf8');
-    } catch { }
+    } catch {}
   }
 
   removeHashByFilename(filename) {
@@ -238,7 +306,7 @@ class NikonCameraUploader {
           return;
         }
       }
-    } catch { }
+    } catch {}
 
     this.activeEventTitle = this.config.eventId
       ? `Event (${this.config.eventId})`
@@ -271,41 +339,38 @@ class NikonCameraUploader {
         1,
         8000
       );
-    } catch {
-      // Server temporarily unreachable (offline mode)
-    }
+    } catch {}
   }
 
   async start() {
     await this.resolveActiveEvent();
 
-    console.log('\n======================================================');
-    console.log('   SS PHOTOGRAPHY — NIKON D750 LIVE INGEST DAEMON');
-    console.log('======================================================');
-    console.log(`[CONFIG] Monitored Folder : ${this.config.watchFolder}`);
-    console.log(`[CONFIG] Active Wedding   : ${this.activeEventTitle}`);
-    console.log(`[CONFIG] Cloud Website    : ${this.config.serverUrl}`);
-    console.log(`[CONFIG] Persistent Queue : ${QUEUE_FILE}`);
-    console.log('------------------------------------------------------\n');
+    const banner = [
+      '',
+      '======================================================',
+      '   SS PHOTOGRAPHY — NIKON D750 LIVE INGEST DAEMON',
+      '======================================================',
+      `[CONFIG] Monitored Folder : ${this.config.watchFolder}`,
+      `[CONFIG] Active Wedding   : ${this.activeEventTitle}`,
+      `[CONFIG] Cloud Website    : ${this.config.serverUrl}`,
+      `[CONFIG] Persistent Queue : ${QUEUE_FILE}`,
+      '------------------------------------------------------',
+    ].join('\n');
+    console.log(banner);
+    appendLogFile(banner);
 
     if (!fs.existsSync(this.config.watchFolder)) {
       try {
         fs.mkdirSync(this.config.watchFolder, { recursive: true });
-        this.log(`Created monitored folder: ${this.config.watchFolder}`);
       } catch {
         this.config.watchFolder = path.join(process.cwd(), 'tether_inbox');
         fs.mkdirSync(this.config.watchFolder, { recursive: true });
-        this.log(`Using fallback monitored folder: ${this.config.watchFolder}`);
       }
     }
 
-    // Heartbeat timer (every 5 seconds)
     setInterval(() => this.sendHeartbeat(), 5000);
-
-    // Periodic deletion reconciliation (every 60 seconds in case laptop slept during delete)
     setInterval(() => this.reconcileLocalFolderWithServer(), 60000);
 
-    // Watcher with Windows-safe polling to prevent EBUSY locks
     const watcher = chokidar.watch(this.config.watchFolder, {
       ignored: /(^|[\/\\])\../,
       persistent: true,
@@ -315,7 +380,7 @@ class NikonCameraUploader {
       binaryInterval: 1500,
       ignorePermissionErrors: true,
       awaitWriteFinish: {
-        stabilityThreshold: 1500, // 1.5s stability buffer for full camera flush
+        stabilityThreshold: 1500,
         pollInterval: 400,
       },
     });
@@ -329,9 +394,10 @@ class NikonCameraUploader {
       })
       .on('ready', async () => {
         this.log('Camera Watcher active! Ready for incoming Nikon D750 captures.');
-        this.log(`Save shots to: ${this.config.watchFolder}\n`);
+        this.log(`Save shots to: ${this.config.watchFolder}`);
         await this.reconcileLocalFolderWithServer();
         if (this.queue.length > 0) this.processQueue();
+        if (this.masterQueue.length > 0) this.processMasterQueue();
       });
   }
 
@@ -347,7 +413,6 @@ class NikonCameraUploader {
 
       let prunedCount = 0;
       for (const photo of serverPhotos) {
-        // Strictly scope reconciliation to CAMERA_TETHER uploads so manual web batch uploads remain untouched
         if (photo.source !== 'CAMERA_TETHER') continue;
 
         if (!localFiles.has(photo.filename)) {
@@ -375,9 +440,7 @@ class NikonCameraUploader {
       if (prunedCount > 0) {
         this.log(`✔ [SYNC AUDIT COMPLETE] Removed ${prunedCount} deleted photo(s) from live website.`);
       }
-    } catch {
-      // Offline / transient network skip
-    }
+    } catch {}
   }
 
   async handleDeletedFile(filePath) {
@@ -387,15 +450,14 @@ class NikonCameraUploader {
     const filename = path.basename(filePath);
     this.removeHashByFilename(filename);
 
-    // 1. Purge from local pending queue if not yet processed
-    const originalLen = this.queue.length;
+    const origQueueLen = this.queue.length;
     this.queue = this.queue.filter((q) => q.filePath !== filePath && q.filename !== filename);
-    if (this.queue.length !== originalLen) {
-      this.saveQueueToDisk();
-      this.log(`[QUEUE PURGED] Cancelled pending ingest for deleted file: ${filename}`);
-    }
+    if (this.queue.length !== origQueueLen) this.saveQueueToDisk();
 
-    // 2. Request website / cloud API to delete photo from live gallery & Google Drive
+    const origMasterLen = this.masterQueue.length;
+    this.masterQueue = this.masterQueue.filter((m) => m.filePath !== filePath && m.filename !== filename);
+    if (this.masterQueue.length !== origMasterLen) this.saveMasterQueueToDisk();
+
     this.log(`[LOCAL DELETION DETECTED] ${filename} removed from tether inbox. Removing from website...`);
 
     try {
@@ -429,27 +491,23 @@ class NikonCameraUploader {
     if (!['.jpg', '.jpeg', '.png', '.nef', '.webp'].includes(ext)) return;
 
     const filename = path.basename(filePath);
-
-    // Avoid adding duplicates to queue
-    const alreadyQueued = this.queue.some((q) => q.filePath === filePath);
-    if (alreadyQueued) return;
+    if (this.queue.some((q) => q.filePath === filePath)) return;
 
     try {
       const stat = fs.statSync(filePath);
       const sizeMB = (stat.size / (1024 * 1024)).toFixed(2);
-
-      // Quick local hash check before queuing on boot recovery
       const quickBuf = await fs.promises.readFile(filePath);
       const quickHash = crypto.createHash('sha256').update(quickBuf).digest('hex');
+
       if (this.uploadedHashes.has(quickHash)) {
         this.uploadedHashes.set(quickHash, filename);
-        return; // Already synced cleanly in a previous session
+        return;
       }
 
       this.stats.detected++;
       this.log(`[NEW CAPTURE] ${filename} (${sizeMB} MB)`);
 
-      const queueItem = {
+      this.queue.push({
         id: `queue_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         filePath,
         filename,
@@ -458,14 +516,10 @@ class NikonCameraUploader {
         status: 'PENDING',
         attempts: 0,
         addedAt: new Date().toISOString(),
-      };
-
-      this.queue.push(queueItem);
+      });
       this.saveQueueToDisk();
       this.processQueue();
-    } catch {
-      // If locked, polling will re-trigger when file is readable
-    }
+    } catch {}
   }
 
   async processQueue() {
@@ -482,7 +536,7 @@ class NikonCameraUploader {
           this.queue.shift();
           this.saveQueueToDisk();
         } else {
-          this.log(`[OFFLINE/BACKOFF] Pausing queue 5 seconds before retry...`);
+          this.log(`[OFFLINE/BACKOFF] Pausing queue 5s before retry...`);
           await new Promise((res) => setTimeout(res, 5000));
           break;
         }
@@ -494,7 +548,7 @@ class NikonCameraUploader {
     }
 
     this.isProcessing = false;
-    if (this.queue.length > 0 && !this.isProcessing) {
+    if (this.queue.length > 0) {
       setTimeout(() => this.processQueue(), 5000);
     }
   }
@@ -519,10 +573,7 @@ class NikonCameraUploader {
       }
     }
 
-    if (!fileBuffer) {
-      this.log(`[WAITING WRITE LOCK] File still being written: ${item.filename}`);
-      return false;
-    }
+    if (!fileBuffer) return false;
 
     const hash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
     item.sha256 = hash;
@@ -530,7 +581,6 @@ class NikonCameraUploader {
     if (this.uploadedHashes.has(hash)) {
       this.stats.duplicates++;
       this.log(`[SKIP DUPLICATE] ${item.filename} already synced to website.`);
-      item.status = 'COMPLETED';
       return true;
     }
 
@@ -539,83 +589,17 @@ class NikonCameraUploader {
 
     try {
       let uploadBuffer = fileBuffer;
-      let originalDriveFileId = '';
-      let originalSafeFilename = '';
       let originalWidth = 0;
       let originalHeight = 0;
+      const isLargeMaster = fileBuffer.length > DIRECT_UPLOAD_THRESHOLD_BYTES;
 
-      // For DSLR captures > 3.2 MB (such as 9-25 MB Nikon D750 JPEGs):
-      // 1) Check duplicate early + initiate Google Drive Resumable Upload session
-      // 2) Upload FULL untouched resolution straight to Google Drive (bypasses Vercel 4.5 MB limit)
-      // 3) Generate lightweight 2048px JPEG (~700 KB) for fast Cloud AI face scan & preview/thumbnail
-      if (fileBuffer.length > DIRECT_UPLOAD_THRESHOLD_BYTES) {
-        const sessionRes = await robustFetch(`${this.config.serverUrl}/api/upload/gdrive-session`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-camera-ingest-key': this.config.apiKey,
-          },
-          body: JSON.stringify({
-            eventId: this.config.eventId,
-            filename: item.filename,
-            mimeType: 'image/jpeg',
-            fileSize: fileBuffer.length,
-            sha256: hash,
-          }),
-        });
-
-        if (!sessionRes.ok) {
-          const errData = await sessionRes.json().catch(() => ({}));
-          throw new Error(errData.error || `Session init HTTP ${sessionRes.status}`);
-        }
-
-        const session = await sessionRes.json();
-        if (session.duplicate) {
-          this.uploadedHashes.set(hash, item.filename);
-          this.saveHashesToDisk();
-          this.stats.duplicates++;
-          this.log(`[DUPLICATE SKIPPED] ${item.filename} already on live website.`);
-          return true;
-        }
-
-        if (session.eventId) {
-          this.config.eventId = session.eventId;
-        }
-
-        if (session.gdriveConfigured && session.uploadUrl) {
-          this.log(
-            `[DIRECT DRIVE SYNC] Uploading full ${(fileBuffer.length / 1048576).toFixed(2)} MB original ${item.filename}...`
-          );
-          const drivePutRes = await robustFetch(
-            session.uploadUrl,
-            {
-              method: 'PUT',
-              headers: {
-                'Content-Type': 'image/jpeg',
-                'Content-Length': String(fileBuffer.length),
-              },
-              body: fileBuffer,
-            },
-            3,
-            120000
-          );
-
-          if (!drivePutRes.ok) {
-            const errTxt = await drivePutRes.text().catch(() => '');
-            throw new Error(`Google Drive direct upload failed: ${drivePutRes.status} ${errTxt}`);
-          }
-
-          const driveData = await drivePutRes.json();
-          originalDriveFileId = driveData.id;
-          originalSafeFilename = session.safeFilename || item.filename;
-        }
-
-        // Prepare crisp 2048px analysis copy (< 1.5 MB) for Vercel YuNet+SFace & watermarking
+      if (isLargeMaster) {
         const rotated = sharp(fileBuffer).rotate();
         const meta = await rotated.metadata();
         originalWidth = meta.width || 0;
         originalHeight = meta.height || 0;
 
+        // Crisp 2048px web master (< 1 MB) for instant live website publish + YuNet AI Scan
         uploadBuffer = await rotated
           .resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true })
           .jpeg({ quality: 86, mozjpeg: true })
@@ -625,10 +609,7 @@ class NikonCameraUploader {
       const formData = new FormData();
       const blob = new Blob([new Uint8Array(uploadBuffer)], { type: 'image/jpeg' });
       formData.append('file', blob, item.filename);
-
-      if (this.config.eventId) {
-        formData.append('eventId', this.config.eventId);
-      }
+      if (this.config.eventId) formData.append('eventId', this.config.eventId);
       formData.append('source', 'CAMERA_TETHER');
       formData.append('sourceDevice', 'Nikon D750');
       formData.append('originalFilename', item.filename);
@@ -636,16 +617,10 @@ class NikonCameraUploader {
       formData.append('originalFileSize', String(fileBuffer.length));
       if (originalWidth) formData.append('originalWidth', String(originalWidth));
       if (originalHeight) formData.append('originalHeight', String(originalHeight));
-      if (originalDriveFileId) {
-        formData.append('originalDriveFileId', originalDriveFileId);
-        formData.append('originalSafeFilename', originalSafeFilename);
-      }
 
       const response = await robustFetch(`${this.config.serverUrl}/api/upload/ingest`, {
         method: 'POST',
-        headers: {
-          'x-camera-ingest-key': this.config.apiKey,
-        },
+        headers: { 'x-camera-ingest-key': this.config.apiKey },
         body: formData,
       });
 
@@ -666,11 +641,23 @@ class NikonCameraUploader {
         this.stats.lastUploadedFile = item.filename;
         this.stats.lastUploadedAt = new Date().toISOString();
         this.log(
-          `✔ [INGEST SUCCESS] ${item.filename} -> Live Website & Google Drive (Faces: ${data.photo?.faceCount ?? 0})`
+          `✔ [LIVE ON WEB] ${item.filename} (${(fileBuffer.length / 1048576).toFixed(2)} MB) synced! (Faces: ${data.photo?.faceCount ?? 0})`
         );
+
+        // Queue untouched full-res original master upload to Google Drive in resilient 2 MB chunks
+        if (isLargeMaster && data.photo?.id) {
+          this.masterQueue.push({
+            photoId: data.photo.id,
+            eventId: data.eventId || this.config.eventId,
+            filePath: item.filePath,
+            filename: item.filename,
+            fileSize: fileBuffer.length,
+          });
+          this.saveMasterQueueToDisk();
+          this.processMasterQueue();
+        }
       }
 
-      item.status = 'COMPLETED';
       return true;
     } catch (err) {
       item.status = 'RETRY';
@@ -679,6 +666,83 @@ class NikonCameraUploader {
       const causeMsg = err.cause?.code ? ` (${err.cause.code})` : '';
       this.log(`✖ [UPLOAD FAILED] ${item.filename} (Attempt ${item.attempts}): ${err.message}${causeMsg}`);
       return false;
+    }
+  }
+
+  async processMasterQueue() {
+    if (this.isProcessingMasters || this.masterQueue.length === 0) return;
+    this.isProcessingMasters = true;
+
+    while (this.masterQueue.length > 0) {
+      const m = this.masterQueue[0];
+      if (!m) break;
+
+      if (!fs.existsSync(m.filePath)) {
+        this.masterQueue.shift();
+        this.saveMasterQueueToDisk();
+        continue;
+      }
+
+      try {
+        const rawBuf = await fs.promises.readFile(m.filePath);
+        const sessionRes = await robustFetch(`${this.config.serverUrl}/api/upload/gdrive-session`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-camera-ingest-key': this.config.apiKey,
+          },
+          body: JSON.stringify({
+            eventId: m.eventId,
+            filename: m.filename,
+            mimeType: 'image/jpeg',
+            fileSize: rawBuf.length,
+            skipDuplicateCheck: true,
+          }),
+        });
+
+        if (!sessionRes.ok) {
+          throw new Error(`Session init HTTP ${sessionRes.status}`);
+        }
+
+        const session = await sessionRes.json();
+        if (session.gdriveConfigured && session.uploadUrl) {
+          this.log(
+            `[MASTER SYNC] Uploading full ${(rawBuf.length / 1048576).toFixed(2)} MB master ${m.filename} (2 MB chunks)...`
+          );
+          const driveFile = await uploadBufferInChunksToDrive(session.uploadUrl, rawBuf);
+
+          const patchRes = await robustFetch(`${this.config.serverUrl}/api/photos`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-camera-ingest-key': this.config.apiKey,
+            },
+            body: JSON.stringify({
+              id: m.photoId,
+              originalDriveFileId: driveFile.id,
+              originalSafeFilename: session.safeFilename,
+            }),
+          });
+
+          if (patchRes.ok) {
+            this.log(
+              `★ [MASTER ARCHIVED] Full ${(rawBuf.length / 1048576).toFixed(2)} MB Nikon original ${m.filename} live on Google Drive!`
+            );
+          }
+        }
+
+        this.masterQueue.shift();
+        this.saveMasterQueueToDisk();
+      } catch (err) {
+        this.log(`[MASTER RETRY LATER] ${m.filename}: ${err.message}`);
+        await new Promise((r) => setTimeout(r, 8000));
+        break;
+      }
+    }
+
+    this.isProcessingMasters = false;
+    if (this.masterQueue.length > 0) {
+      setTimeout(() => this.processMasterQueue(), 8000);
     }
   }
 }
